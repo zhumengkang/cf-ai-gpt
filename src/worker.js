@@ -165,6 +165,14 @@ async function handleChat(request, env, corsHeaders) {
       reply = response;
     } else if (response && typeof response.response === 'string') {
       reply = response.response;
+      
+      // 特殊处理DeepSeek模型的思考部分
+      if (selectedModel.id.includes('deepseek') && reply.includes('<think>')) {
+        const finalAnswerMatch = reply.match(/<\/think>\s*([\s\S]*?)$/);
+        if (finalAnswerMatch) {
+          reply = finalAnswerMatch[1].trim();
+        }
+      }
     } else {
       reply = '抱歉，模型返回了无效的响应格式。';
     }
@@ -259,8 +267,16 @@ function getHTML() {
         .main-content { display: flex; flex: 1; overflow: hidden; }
         .sidebar { width: 300px; background: #f8fafc; border-right: 1px solid #e2e8f0; padding: 20px; overflow-y: auto; }
         .chat-area { flex: 1; display: flex; flex-direction: column; }
-        .auth-section { background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 10px; padding: 15px; margin-bottom: 20px; }
-        .auth-section.authenticated { background: #d1ecf1; border-color: #bee5eb; }
+        .auth-section { 
+            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%); 
+            border: 2px solid #ff6b9d; border-radius: 15px; padding: 20px; margin-bottom: 20px; 
+            box-shadow: 0 8px 16px rgba(255, 107, 157, 0.2);
+        }
+        .auth-section.authenticated { 
+            background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); 
+            border-color: #4facfe; 
+            box-shadow: 0 8px 16px rgba(79, 172, 254, 0.2);
+        }
         .model-section { margin-bottom: 20px; }
         .model-select { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; margin-bottom: 10px; }
         .model-info { background: #f1f5f9; padding: 10px; border-radius: 8px; font-size: 12px; line-height: 1.4; }
@@ -351,6 +367,14 @@ function getHTML() {
             const infoDiv = document.getElementById('modelInfo');
             const selectedModel = select.value;
             if (!selectedModel) { infoDiv.innerHTML = '请先选择一个AI模型'; return; }
+            
+            // 切换模型时清空聊天记录
+            if (currentModel && currentModel !== selectedModel) {
+                chatHistory = [];
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换到新模型，开始新的对话</div></div>';
+            }
+            
             currentModel = selectedModel;
             const model = models[selectedModel];
             infoDiv.innerHTML = \`<strong>\${model.name}</strong><br>📝 \${model.description}<br><br>💰 输入: $\${model.input_price}/百万tokens<br>• 输出: $\${model.output_price}/百万tokens<br><br>📏 上下文: \${model.context.toLocaleString()} tokens\`;
