@@ -121,6 +121,13 @@ async function handleChat(request, env, corsHeaders) {
       });
     }
 
+    // 如果是测试消息，直接返回成功
+    if (message === 'test') {
+      return new Response(JSON.stringify({ reply: 'test', model: 'test' }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
     // 验证模型
     if (!MODEL_CONFIG[model]) {
       return new Response(JSON.stringify({ error: '无效的模型' }), {
@@ -168,11 +175,15 @@ async function handleChat(request, env, corsHeaders) {
       
       // 特殊处理DeepSeek模型的思考部分
       if (selectedModel.id.includes('deepseek') && reply.includes('<think>')) {
-        const finalAnswerMatch = reply.match(/<\/think>\s*([\s\S]*?)$/);
-        if (finalAnswerMatch) {
-          reply = finalAnswerMatch[1].trim();
+        // 提取 </think> 之后的内容作为最终答案
+        const thinkEndIndex = reply.lastIndexOf('</think>');
+        if (thinkEndIndex !== -1) {
+          reply = reply.substring(thinkEndIndex + 8).trim();
         }
       }
+      
+      // 为回复中的代码添加格式化
+      reply = formatCodeBlocks(reply);
     } else {
       reply = '抱歉，模型返回了无效的响应格式。';
     }
@@ -252,6 +263,19 @@ async function saveHistory(request, env, corsHeaders) {
   }
 }
 
+// 格式化代码块
+function formatCodeBlocks(text) {
+  // 处理代码块格式
+  text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
+    return `<pre><code class="language-${lang || 'text'}">${code.trim()}</code></pre>`;
+  });
+  
+  // 处理行内代码
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  
+  return text;
+}
+
 function getHTML() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -298,6 +322,9 @@ function getHTML() {
         .loading { display: none; text-align: center; padding: 20px; color: #6b7280; }
         .error { background: #fef2f2; color: #dc2626; padding: 10px; border-radius: 8px; margin: 10px 0; }
         .success { background: #f0f9ff; color: #0369a1; padding: 10px; border-radius: 8px; margin: 10px 0; }
+        pre { background: #f1f5f9; padding: 15px; border-radius: 8px; overflow-x: auto; margin: 10px 0; }
+        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; }
+        pre code { background: none; padding: 0; }
     </style>
 </head>
 <body>
@@ -368,11 +395,11 @@ function getHTML() {
             const selectedModel = select.value;
             if (!selectedModel) { infoDiv.innerHTML = '请先选择一个AI模型'; return; }
             
-            // 切换模型时清空聊天记录
+            // 切换模型时加载对应模型的历史记录
             if (currentModel && currentModel !== selectedModel) {
                 chatHistory = [];
                 const messagesDiv = document.getElementById('messages');
-                messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换到新模型，开始新的对话</div></div>';
+                messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换模型，正在加载历史记录...</div></div>';
             }
             
             currentModel = selectedModel;
@@ -381,24 +408,37 @@ function getHTML() {
             if (isAuthenticated) {
                 document.getElementById('messageInput').disabled = false;
                 document.getElementById('sendBtn').disabled = false;
+                // 切换模型后自动加载对应历史记录
+                loadHistory();
             }
         }
         async function authenticate() {
             const password = document.getElementById('passwordInput').value;
             if (!password) { showError('请输入密码'); return; }
             try {
-                const response = await fetch('/api/models', { headers: { 'Authorization': \`Bearer \${password}\` } });
-                if (response.ok) {
-                    isAuthenticated = true; currentPassword = password;
-                    const authSection = document.getElementById('authSection');
-                    authSection.className = 'auth-section authenticated';
-                    authSection.innerHTML = '<p>✅ 身份验证成功！</p>';
-                    document.getElementById('modelSection').style.display = 'block';
-                    document.getElementById('historySection').style.display = 'block';
-                    showSuccess('验证成功！请选择AI模型开始聊天。');
-                    await loadHistory();
-                } else { showError('密码错误，请重试'); }
-            } catch (error) { showError('验证失败: ' + error.message); }
+                // 发送测试请求验证密码
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: 'test', model: 'deepseek-r1', password: password })
+                });
+                
+                if (response.status === 401) {
+                    showError('密码错误，请重试');
+                    return;
+                }
+                
+                isAuthenticated = true; 
+                currentPassword = password;
+                const authSection = document.getElementById('authSection');
+                authSection.className = 'auth-section authenticated';
+                authSection.innerHTML = '<p>✅ 身份验证成功！</p>';
+                document.getElementById('modelSection').style.display = 'block';
+                document.getElementById('historySection').style.display = 'block';
+                showSuccess('验证成功！请选择AI模型开始聊天。');
+            } catch (error) { 
+                showError('验证失败: ' + error.message); 
+            }
         }
         async function sendMessage() {
             if (!isAuthenticated || !currentModel) { showError('请先验证身份并选择模型'); return; }
@@ -433,38 +473,48 @@ function getHTML() {
             let metaInfo = new Date().toLocaleTimeString();
             if (modelName) metaInfo = \`\${modelName} • \${metaInfo}\`;
             if (usage && usage.total_tokens) metaInfo += \` • \${usage.total_tokens} tokens\`;
-            messageDiv.innerHTML = \`<div class="message-content">\${content.replace(/\\n/g, '<br>')}</div><div style="font-size:12px;color:#6b7280;margin-top:5px;">\${metaInfo}</div>\`;
+            messageDiv.innerHTML = \`<div class="message-content">\${content}</div><div style="font-size:12px;color:#6b7280;margin-top:5px;">\${metaInfo}</div>\`;
             messagesDiv.appendChild(messageDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
         async function loadHistory() {
-            if (!isAuthenticated) return;
+            if (!isAuthenticated || !currentModel) return;
             try {
-                const response = await fetch(\`/api/history?password=\${encodeURIComponent(currentPassword)}&sessionId=default\`);
+                const sessionId = \`\${currentModel}_history\`;
+                const response = await fetch(\`/api/history?password=\${encodeURIComponent(currentPassword)}&sessionId=\${sessionId}\`);
                 const data = await response.json();
                 if (response.ok) {
                     chatHistory = data.history || [];
                     const messagesDiv = document.getElementById('messages');
-                    messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">📚 历史记录已加载</div></div>';
+                    const modelName = models[currentModel]?.name || currentModel;
+                    messagesDiv.innerHTML = \`<div class="message assistant"><div class="message-content">📚 已加载 \${modelName} 的历史记录</div></div>\`;
                     chatHistory.forEach(msg => addMessage(msg.role, msg.content, msg.model || ''));
-                    showSuccess(chatHistory.length ? \`已加载 \${chatHistory.length} 条历史记录\` : '暂无历史记录');
+                    if (chatHistory.length === 0) {
+                        showSuccess(\`\${modelName} 暂无历史记录\`);
+                    } else {
+                        showSuccess(\`已加载 \${modelName} 的 \${chatHistory.length} 条历史记录\`);
+                    }
                 } else { showError(data.error || '加载历史记录失败'); }
             } catch (error) { showError('加载历史记录失败: ' + error.message); }
         }
         async function saveHistory() {
-            if (!isAuthenticated) return;
+            if (!isAuthenticated || !currentModel) return;
             try {
+                const sessionId = \`\${currentModel}_history\`;
                 await fetch('/api/history', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password: currentPassword, sessionId: 'default', history: chatHistory })
+                    body: JSON.stringify({ password: currentPassword, sessionId: sessionId, history: chatHistory })
                 });
             } catch (error) { console.error('Save history failed:', error); }
         }
         async function clearHistory() {
-            if (!confirm('确定要清空所有聊天记录吗？')) return;
-            chatHistory = []; await saveHistory();
-            document.getElementById('messages').innerHTML = '<div class="message assistant"><div class="message-content">✨ 聊天记录已清空</div></div>';
-            showSuccess('聊天记录已清空');
+            if (!currentModel) { showError('请先选择模型'); return; }
+            const modelName = models[currentModel]?.name || currentModel;
+            if (!confirm(\`确定要清空 \${modelName} 的所有聊天记录吗？\`)) return;
+            chatHistory = []; 
+            await saveHistory();
+            document.getElementById('messages').innerHTML = \`<div class="message assistant"><div class="message-content">✨ \${modelName} 聊天记录已清空</div></div>\`;
+            showSuccess(\`\${modelName} 聊天记录已清空\`);
         }
         function handleKeyDown(event) {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }
