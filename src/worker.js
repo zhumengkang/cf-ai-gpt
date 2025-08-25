@@ -174,37 +174,66 @@ async function handleChat(request, env, corsHeaders) {
     
     let response;
 
-    if (selectedModel.use_messages) {
-      // 使用messages参数的模型
-      const messages = [
-        { role: "system", content: "你是一个友善的AI助手，请用中文回答问题。" },
-        ...recentHistory.map(h => ({ role: h.role, content: h.content })),
-        { role: "user", content: message }
-      ];
+    try {
+      if (selectedModel.use_messages) {
+        // 使用messages参数的模型
+        const messages = [
+          { role: "system", content: "你是一个友善的AI助手，请用中文回答问题。" },
+          ...recentHistory.map(h => ({ role: h.role, content: h.content })),
+          { role: "user", content: message }
+        ];
 
-      response = await env.AI.run(selectedModel.id, { messages });
-    } else {
-      // 使用instructions参数的模型
-      const instructions = "你是一个友善的AI助手，请用中文回答问题。";
-      const contextualInput = recentHistory.length > 0 
-        ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
-        : message;
+        console.log('调用模型参数 (messages):', JSON.stringify({ 
+          model: selectedModel.id, 
+          messages: messages.slice(-3) // 只显示最近3条消息避免日志过长
+        }, null, 2));
+        
+        response = await env.AI.run(selectedModel.id, { messages });
+      } else {
+        // 使用instructions参数的模型
+        const instructions = "你是一个友善的AI助手，请用中文回答问题。";
+        const contextualInput = recentHistory.length > 0 
+          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
+          : message;
 
-      response = await env.AI.run(selectedModel.id, {
-        instructions: instructions,
-        input: contextualInput
-      });
+        const params = {
+          instructions: instructions,
+          input: contextualInput
+        };
+        
+        console.log('调用模型参数 (instructions):', JSON.stringify({ 
+          model: selectedModel.id, 
+          params: { instructions, input: contextualInput.substring(0, 200) + '...' }
+        }, null, 2));
+
+        response = await env.AI.run(selectedModel.id, params);
+      }
+    } catch (error) {
+      console.error('AI模型调用失败:', error);
+      throw new Error(`${selectedModel.name} 调用失败: ${error.message}`);
     }
 
+    // 记录原始响应用于调试
+    console.log('AI模型原始响应:', JSON.stringify(response, null, 2));
+    
     // 提取纯文本回复
     let reply;
     if (typeof response === 'string') {
       reply = response;
-    } else if (response && typeof response.response === 'string') {
-      reply = response.response;
+    } else if (response && typeof response === 'object') {
+      if (typeof response.response === 'string') {
+        reply = response.response;
+      } else if (typeof response.text === 'string') {
+        reply = response.text;
+      } else if (typeof response.output === 'string') {
+        reply = response.output;
+      } else {
+        console.error('未知的响应格式:', response);
+        reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}`;
+      }
       
       // 特殊处理DeepSeek模型的思考部分
-      if (selectedModel.id.includes('deepseek') && reply.includes('<think>')) {
+      if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
         // 提取 </think> 之后的内容作为最终答案
         const thinkEndIndex = reply.lastIndexOf('</think>');
         if (thinkEndIndex !== -1) {
@@ -215,7 +244,8 @@ async function handleChat(request, env, corsHeaders) {
       // 为回复中的代码添加格式化
       reply = formatCodeBlocks(reply);
     } else {
-      reply = '抱歉，模型返回了无效的响应格式。';
+      console.error('完全意外的响应:', response);
+      reply = `抱歉，AI模型返回了完全意外的格式。响应类型: ${typeof response}`;
     }
 
     return new Response(JSON.stringify({ 
@@ -295,13 +325,31 @@ async function saveHistory(request, env, corsHeaders) {
 
 // 格式化代码块
 function formatCodeBlocks(text) {
-  // 处理代码块格式
+  // 转义HTML特殊字符
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+  }
+  
+  // 处理多行代码块
   text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
-    return `<pre><code class="language-${lang || 'text'}">${code.trim()}</code></pre>`;
+    const escapedCode = escapeHtml(code.trim());
+    return `<div class="code-block">
+      <div class="code-header">
+        <span class="language">${lang || 'text'}</span>
+        <button class="copy-btn" onclick="copyCode(this)">复制</button>
+      </div>
+      <pre><code class="language-${lang || 'text'}">${escapedCode}</code></pre>
+    </div>`;
   });
   
   // 处理行内代码
-  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/`([^`]+)`/g, (match, code) => {
+    return `<code class="inline-code">${escapeHtml(code)}</code>`;
+  });
   
   return text;
 }
@@ -355,9 +403,16 @@ function getHTML() {
         .loading { display: none; text-align: center; padding: 20px; color: #6b7280; }
         .error { background: #fef2f2; color: #dc2626; padding: 10px; border-radius: 8px; margin: 10px 0; }
         .success { background: #f0f9ff; color: #0369a1; padding: 10px; border-radius: 8px; margin: 10px 0; }
-        pre { background: #f1f5f9; padding: 15px; border-radius: 8px; overflow-x: auto; margin: 10px 0; }
-        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; }
-        pre code { background: none; padding: 0; }
+        .code-block { margin: 15px 0; border-radius: 8px; overflow: hidden; border: 1px solid #e2e8f0; }
+        .code-header { background: #f8fafc; padding: 8px 15px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e2e8f0; }
+        .language { font-size: 12px; color: #64748b; font-weight: 500; }
+        .copy-btn { background: #3b82f6; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+        .copy-btn:hover { background: #2563eb; }
+        .copy-btn:active { background: #1d4ed8; }
+        pre { background: #f8fafc; padding: 15px; margin: 0; overflow-x: auto; line-height: 1.5; }
+        code { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 13px; }
+        .inline-code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 13px; }
+        .code-block code { background: none; padding: 0; color: #1f2937; }
     </style>
 </head>
 <body>
@@ -597,6 +652,30 @@ function getHTML() {
             div.className = 'success'; div.textContent = message;
             document.querySelector('.sidebar').appendChild(div);
             setTimeout(() => div.remove(), 3000);
+        }
+        
+        // 复制代码功能
+        function copyCode(button) {
+            const codeBlock = button.closest('.code-block');
+            const code = codeBlock.querySelector('pre code');
+            const text = code.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = button.textContent;
+                button.textContent = '已复制!';
+                button.style.background = '#10b981';
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.style.background = '#3b82f6';
+                }, 2000);
+            }).catch(err => {
+                console.error('复制失败:', err);
+                // 降级方案：选中文本
+                const range = document.createRange();
+                range.selectNode(code);
+                window.getSelection().removeAllRanges();
+                window.getSelection().addRange(range);
+            });
         }
     </script>
 </body>
