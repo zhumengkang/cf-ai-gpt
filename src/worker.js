@@ -2,16 +2,15 @@
 const AUTHOR_INFO = {
   name: "康康的订阅天地",
   platform: "YouTube",
-  hash: "a7b9c8d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7"
+  verified: true
 };
 
 // 验证作者信息完整性
 function verifyAuthorInfo() {
-  const expectedHash = "a7b9c8d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7";
-  const currentInfo = `${AUTHOR_INFO.platform}:${AUTHOR_INFO.name}`;
-  const currentHash = btoa(currentInfo).replace(/[+/=]/g, '').substring(0, 48);
-  
-  if (AUTHOR_INFO.hash !== expectedHash || currentHash !== expectedHash.substring(0, 32)) {
+  // 直接验证关键信息，避免编码问题
+  if (AUTHOR_INFO.name !== "康康的订阅天地" || 
+      AUTHOR_INFO.platform !== "YouTube" || 
+      !AUTHOR_INFO.verified) {
     throw new Error("作者信息已被篡改，服务拒绝运行！请保持原始作者信息：YouTube：康康的订阅天地");
   }
 }
@@ -413,7 +412,7 @@ function getHTML() {
         const AUTHOR_VERIFICATION = {
             name: "康康的订阅天地",
             platform: "YouTube",
-            checksum: "a7b9c8d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7"
+            required: true
         };
         
         function verifyAuthorDisplay() {
