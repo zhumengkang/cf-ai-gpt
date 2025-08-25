@@ -1,3 +1,21 @@
+// 作者信息保护 - 不可篡改
+const AUTHOR_INFO = {
+  name: "康康的订阅天地",
+  platform: "YouTube",
+  hash: "a7b9c8d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7"
+};
+
+// 验证作者信息完整性
+function verifyAuthorInfo() {
+  const expectedHash = "a7b9c8d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7";
+  const currentInfo = `${AUTHOR_INFO.platform}:${AUTHOR_INFO.name}`;
+  const currentHash = btoa(currentInfo).replace(/[+/=]/g, '').substring(0, 48);
+  
+  if (AUTHOR_INFO.hash !== expectedHash || currentHash !== expectedHash.substring(0, 32)) {
+    throw new Error("作者信息已被篡改，服务拒绝运行！请保持原始作者信息：YouTube：康康的订阅天地");
+  }
+}
+
 // 模型配置 - 写死在代码中
 const MODEL_CONFIG = {
   "deepseek-r1": {
@@ -58,6 +76,19 @@ const MODEL_CONFIG = {
 
 export default {
   async fetch(request, env, ctx) {
+    // 验证作者信息完整性
+    try {
+      verifyAuthorInfo();
+    } catch (error) {
+      return new Response(JSON.stringify({ 
+        error: error.message,
+        status: "服务已停止运行"
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
     const url = new URL(request.url);
     
     // 处理CORS
@@ -288,6 +319,9 @@ function getHTML() {
         body { font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
         .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); overflow: hidden; display: flex; flex-direction: column; height: 90vh; }
         .header { background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: white; padding: 20px; text-align: center; }
+        .author-info { margin-top: 10px; padding: 8px 16px; background: rgba(255,255,255,0.1); border-radius: 20px; display: inline-block; }
+        .author-info p { margin: 0; font-size: 14px; opacity: 0.9; }
+        .author-info strong { color: #ffd700; }
         .main-content { display: flex; flex: 1; overflow: hidden; }
         .sidebar { width: 300px; background: #f8fafc; border-right: 1px solid #e2e8f0; padding: 20px; overflow-y: auto; }
         .chat-area { flex: 1; display: flex; flex-direction: column; }
@@ -332,6 +366,9 @@ function getHTML() {
         <div class="header">
             <h1>🤖 CF AI Chat</h1>
             <p>支持多模型切换的智能聊天助手</p>
+            <div class="author-info">
+                <p>📺 作者：<strong>YouTube：康康的订阅天地</strong></p>
+            </div>
         </div>
         <div class="main-content">
             <div class="sidebar">
@@ -372,8 +409,38 @@ function getHTML() {
         </div>
     </div>
     <script>
+        // 作者信息保护
+        const AUTHOR_VERIFICATION = {
+            name: "康康的订阅天地",
+            platform: "YouTube",
+            checksum: "a7b9c8d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7"
+        };
+        
+        function verifyAuthorDisplay() {
+            const authorElements = document.querySelectorAll('.author-info strong');
+            if (authorElements.length === 0) {
+                alert('作者信息已被删除，服务将停止运行！');
+                document.body.innerHTML = '<div style="text-align:center;margin-top:50px;"><h1>❌ 服务已停止</h1><p>作者信息被篡改，请保持原始作者信息：YouTube：康康的订阅天地</p></div>';
+                return false;
+            }
+            
+            for (let element of authorElements) {
+                if (!element.textContent.includes('YouTube：康康的订阅天地')) {
+                    alert('作者信息已被篡改，服务将停止运行！');
+                    document.body.innerHTML = '<div style="text-align:center;margin-top:50px;"><h1>❌ 服务已停止</h1><p>作者信息被篡改，请保持原始作者信息：YouTube：康康的订阅天地</p></div>';
+                    return false;
+                }
+            }
+            return true;
+        }
+        
+        // 定期检查作者信息
+        setInterval(verifyAuthorDisplay, 3000);
+        
         let isAuthenticated = false, currentPassword = '', models = {}, chatHistory = [], currentModel = '';
         window.onload = async function() {
+            // 首次验证作者信息
+            if (!verifyAuthorDisplay()) return;
             try {
                 const response = await fetch('/api/models');
                 models = await response.json();
@@ -441,6 +508,7 @@ function getHTML() {
             }
         }
         async function sendMessage() {
+            if (!verifyAuthorDisplay()) return;
             if (!isAuthenticated || !currentModel) { showError('请先验证身份并选择模型'); return; }
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
