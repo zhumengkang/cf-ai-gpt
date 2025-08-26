@@ -290,14 +290,17 @@ async function handleChat(request, env, corsHeaders) {
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
       
       if (selectedModel.use_input) {
-        // GPT模型只使用input参数，根据官方文档
-        const inputText = recentHistory.length > 0 
-          ? `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
-          : `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n问题: ${message}\n\n请用中文回答:`;
+        // GPT模型使用instructions + input参数，根据官方示例
+        const instructions = "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。";
+        
+        const userInput = recentHistory.length > 0 
+          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
+          : message;
         
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const inputParams = {
-          input: inputText,
+          instructions: instructions,
+          input: userInput,
           stream: false,  // 强制关闭流式响应
           ...optimalParams
         };
