@@ -15,61 +15,143 @@ function verifyAuthorInfo() {
   }
 }
 
+// 模型特定参数配置
+function getModelOptimalParams(modelKey, modelId) {
+  const baseParams = {
+    temperature: 0.7,
+    stream: false
+  };
+  
+  // 根据不同模型设置最优参数
+  switch (modelKey) {
+    case 'deepseek-r1':
+      return {
+        ...baseParams,
+        max_tokens: 8192,        // DeepSeek支持大输出
+        temperature: 0.8,        // 思维链推理需要更高创造性
+        top_p: 0.9,
+        top_k: 50
+      };
+      
+    case 'gpt-oss-120b':
+      return {
+        ...baseParams,
+        max_tokens: 4096,        // 生产级模型，平衡质量和速度
+        temperature: 0.7,
+        top_p: 0.95,
+        presence_penalty: 0.1
+      };
+      
+    case 'gpt-oss-20b':
+      return {
+        ...baseParams,
+        max_tokens: 2048,        // 低延迟模型，快速响应
+        temperature: 0.6,
+        top_p: 0.9
+      };
+      
+    case 'llama-4-scout':
+      return {
+        ...baseParams,
+        max_tokens: 4096,        // 多模态模型，支持长输出
+        temperature: 0.75,
+        top_p: 0.95,
+        repeat_penalty: 1.1
+      };
+      
+    case 'qwen-coder':
+      return {
+        ...baseParams,
+        max_tokens: 8192,        // 代码模型需要长输出
+        temperature: 0.3,        // 代码生成需要低随机性
+        top_p: 0.8,
+        stop: ["```\n\n", "---"]
+      };
+      
+    case 'gemma-3':
+      return {
+        ...baseParams,
+        max_tokens: 4096,        // 多语言模型
+        temperature: 0.8,
+        top_p: 0.9,
+        top_k: 40
+      };
+      
+    default:
+      return {
+        ...baseParams,
+        max_tokens: 2048
+      };
+  }
+}
+
 // 模型配置 - 写死在代码中
 const MODEL_CONFIG = {
   "deepseek-r1": {
     "id": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
     "name": "DeepSeek-R1-Distill-Qwen-32B",
-    "description": "基于Qwen2.5的蒸馏模型，超越OpenAI-o1-mini，适合复杂推理",
+    "description": "思维链推理模型，支持复杂逻辑推理和数学计算",
     "context": 80000,
+    "max_output": 8192,
     "input_price": 0.50,
     "output_price": 4.88,
-    "use_messages": true
+    "use_messages": true,
+    "features": ["思维链推理", "数学计算", "代码生成"]
   },
   "gpt-oss-120b": {
     "id": "@cf/openai/gpt-oss-120b",
-    "name": "OpenAI GPT-OSS-120B", 
-    "description": "生产级通用模型，适合高推理需求任务",
+    "name": "OpenAI GPT-OSS-120B",
+    "description": "生产级通用模型，高质量文本生成和推理",
     "context": 128000,
+    "max_output": 4096,
     "input_price": 0.35,
     "output_price": 0.75,
-    "use_messages": false
+    "use_messages": false,
+    "features": ["通用对话", "文本分析", "创意写作"]
   },
   "gpt-oss-20b": {
     "id": "@cf/openai/gpt-oss-20b",
     "name": "OpenAI GPT-OSS-20B",
-    "description": "低延迟模型，适合专用或本地化应用",
+    "description": "低延迟快速响应模型，适合实时对话",
     "context": 128000,
+    "max_output": 2048,
     "input_price": 0.20,
     "output_price": 0.30,
-    "use_messages": false
+    "use_messages": false,
+    "features": ["快速响应", "实时对话", "简单任务"]
   },
   "llama-4-scout": {
     "id": "@cf/meta/llama-4-scout-17b-16e-instruct",
     "name": "Meta Llama 4 Scout",
-    "description": "多模态模型，支持文本和图像理解",
+    "description": "多模态模型，支持文本和图像理解分析",
     "context": 131000,
+    "max_output": 4096,
     "input_price": 0.27,
     "output_price": 0.85,
-    "use_messages": true
+    "use_messages": true,
+    "features": ["多模态", "图像理解", "长文档分析"]
   },
   "qwen-coder": {
     "id": "@cf/qwen/qwen2.5-coder-32b-instruct",
     "name": "Qwen2.5-Coder-32B",
-    "description": "代码专用模型，适合代码生成和理解",
+    "description": "代码专家模型，擅长编程和技术问题",
     "context": 32768,
+    "max_output": 8192,
     "input_price": 0.66,
     "output_price": 1.00,
-    "use_messages": true
+    "use_messages": true,
+    "features": ["代码生成", "调试分析", "技术文档"]
   },
   "gemma-3": {
     "id": "@cf/google/gemma-3-12b-it",
     "name": "Gemma 3 12B",
-    "description": "多语言多模态模型，支持140+种语言",
+    "description": "多语言模型，支持140+种语言和文化理解",
     "context": 80000,
+    "max_output": 4096,
     "input_price": 0.35,
     "output_price": 0.56,
-    "use_messages": true
+    "use_messages": true,
+    "features": ["多语言", "文化理解", "翻译"]
   }
 };
 
@@ -175,6 +257,10 @@ async function handleChat(request, env, corsHeaders) {
     let response;
 
     try {
+      // 设置超时处理
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
+      
       if (selectedModel.use_messages) {
         // 使用messages参数的模型
         const messages = [
@@ -188,7 +274,15 @@ async function handleChat(request, env, corsHeaders) {
           messages: messages.slice(-3) // 只显示最近3条消息避免日志过长
         }, null, 2));
         
-        response = await env.AI.run(selectedModel.id, { messages });
+        const optimalParams = getModelOptimalParams(currentModel, selectedModel.id);
+        const messagesParams = {
+          messages,
+          ...optimalParams
+        };
+        
+        console.log(`${selectedModel.name} 最优参数:`, JSON.stringify(optimalParams, null, 2));
+        
+        response = await env.AI.run(selectedModel.id, messagesParams);
       } else {
         // 使用instructions参数的模型
         const instructions = "你是一个友善的AI助手，请用中文回答问题。";
@@ -206,10 +300,25 @@ async function handleChat(request, env, corsHeaders) {
           params: { instructions, input: contextualInput.substring(0, 200) + '...' }
         }, null, 2));
 
-        response = await env.AI.run(selectedModel.id, params);
+        const optimalParams = getModelOptimalParams(currentModel, selectedModel.id);
+        const fullParams = {
+          ...params,
+          ...optimalParams
+        };
+        
+        console.log(`${selectedModel.name} 最优参数:`, JSON.stringify(optimalParams, null, 2));
+        
+        response = await env.AI.run(selectedModel.id, fullParams);
       }
+      
+      // 清除超时定时器
+      clearTimeout(timeoutId);
+      
     } catch (error) {
       console.error('AI模型调用失败:', error);
+      if (error.name === 'AbortError') {
+        throw new Error(`${selectedModel.name} 调用超时（30秒），请稍后重试`);
+      }
       throw new Error(`${selectedModel.name} 调用失败: ${error.message}`);
     }
 
@@ -221,23 +330,51 @@ async function handleChat(request, env, corsHeaders) {
     if (typeof response === 'string') {
       reply = response;
     } else if (response && typeof response === 'object') {
+      // 优先检查常见的响应字段
       if (typeof response.response === 'string') {
         reply = response.response;
       } else if (typeof response.text === 'string') {
         reply = response.text;
       } else if (typeof response.output === 'string') {
         reply = response.output;
+      } else if (response.choices && response.choices.length > 0) {
+        // OpenAI格式的响应
+        if (response.choices[0].message && response.choices[0].message.content) {
+          reply = response.choices[0].message.content;
+        } else if (response.choices[0].text) {
+          reply = response.choices[0].text;
+        }
+      } else if (response.content) {
+        reply = response.content;
+      } else if (response.message) {
+        reply = response.message;
       } else {
         console.error('未知的响应格式:', response);
-        reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}`;
+        // 尝试从对象中提取任何字符串值
+        const possibleContent = Object.values(response).find(val => 
+          typeof val === 'string' && val.length > 0 && val.length < 10000
+        );
+        if (possibleContent) {
+          reply = possibleContent;
+        } else {
+          reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}。原始内容: ${JSON.stringify(response).substring(0, 500)}...`;
+        }
       }
       
       // 特殊处理DeepSeek模型的思考部分
       if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
+        console.log('DeepSeek原始回复长度:', reply.length);
+        console.log('DeepSeek原始回复片段:', reply.substring(0, 200) + '...');
+        
         // 提取 </think> 之后的内容作为最终答案
         const thinkEndIndex = reply.lastIndexOf('</think>');
         if (thinkEndIndex !== -1) {
-          reply = reply.substring(thinkEndIndex + 8).trim();
+          const cleanReply = reply.substring(thinkEndIndex + 8).trim();
+          console.log('DeepSeek清理后回复:', cleanReply);
+          reply = cleanReply;
+        } else {
+          // 如果没有找到</think>，可能思考部分被截断，保留原内容
+          console.log('DeepSeek未找到</think>标签，保留原内容');
         }
       }
       
@@ -525,7 +662,19 @@ function getHTML() {
             
             currentModel = selectedModel;
             const model = models[selectedModel];
-            infoDiv.innerHTML = \`<strong>\${model.name}</strong><br>📝 \${model.description}<br><br>💰 输入: $\${model.input_price}/百万tokens<br>• 输出: $\${model.output_price}/百万tokens<br><br>📏 上下文: \${model.context.toLocaleString()} tokens\`;
+            const features = model.features ? model.features.join(' • ') : '';
+            infoDiv.innerHTML = \`
+                <strong>\${model.name}</strong><br>
+                📝 \${model.description}<br><br>
+                🎯 <strong>特色功能:</strong><br>
+                \${features}<br><br>
+                💰 <strong>价格:</strong><br>
+                • 输入: $\${model.input_price}/百万tokens<br>
+                • 输出: $\${model.output_price}/百万tokens<br><br>
+                📏 <strong>限制:</strong><br>
+                • 上下文: \${model.context.toLocaleString()} tokens<br>
+                • 最大输出: \${model.max_output.toLocaleString()} tokens
+            \`;
             if (isAuthenticated) {
                 document.getElementById('messageInput').disabled = false;
                 document.getElementById('sendBtn').disabled = false;
