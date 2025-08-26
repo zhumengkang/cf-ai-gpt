@@ -292,8 +292,8 @@ async function handleChat(request, env, corsHeaders) {
       if (selectedModel.use_input) {
         // GPT模型使用input参数
         const inputText = recentHistory.length > 0 
-          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
-          : `你是一个友善的AI助手，请用中文回答问题。\n\n问题: ${message}`;
+          ? `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
+          : `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n问题: ${message}\n\n请用中文回答:`;
         
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const inputParams = {
@@ -307,8 +307,8 @@ async function handleChat(request, env, corsHeaders) {
       } else if (selectedModel.use_prompt) {
         // Gemma等模型使用prompt参数
         const promptText = recentHistory.length > 0 
-          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
-          : `你是一个友善的AI助手，请用中文回答问题。\n\n问题: ${message}`;
+          ? `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
+          : `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n问题: ${message}\n\n请用中文回答:`;
         
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const promptParams = {
@@ -322,9 +322,9 @@ async function handleChat(request, env, corsHeaders) {
       } else if (selectedModel.use_messages) {
         // 使用messages参数的模型
         const messages = [
-          { role: "system", content: "你是一个友善的AI助手，请用中文回答问题。" },
+          { role: "system", content: "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。" },
           ...recentHistory.map(h => ({ role: h.role, content: h.content })),
-          { role: "user", content: message }
+          { role: "user", content: `${message}\n\n请用中文回答:` }
         ];
 
         console.log('调用模型参数 (messages):', JSON.stringify({ 
@@ -365,8 +365,14 @@ async function handleChat(request, env, corsHeaders) {
     if (typeof response === 'string') {
       reply = response;
     } else if (response && typeof response === 'object') {
-      // 优先检查常见的响应字段
-      if (typeof response.response === 'string') {
+      // 特殊处理GPT模型的响应格式
+      if (selectedModel.use_input && response.result) {
+        // GPT模型通常返回 { result: "实际内容" } 格式
+        reply = response.result;
+      } else if (selectedModel.use_input && response.response) {
+        // 有些GPT模型可能返回 { response: "实际内容" } 格式
+        reply = response.response;
+      } else if (typeof response.response === 'string') {
         reply = response.response;
       } else if (typeof response.text === 'string') {
         reply = response.text;
@@ -550,7 +556,7 @@ function getHTML() {
         .author-info p { margin: 0; font-size: 14px; opacity: 0.9; }
         .author-info strong { color: #ffd700; }
         .main-content { display: flex; flex: 1; overflow: hidden; }
-        .sidebar { width: 300px; background: #f8fafc; border-right: 1px solid #e2e8f0; padding: 20px; overflow-y: auto; }
+        .sidebar { width: 300px; background: #f8fafc; border-right: 1px solid #e2e8f0; padding: 20px; overflow-y: auto; display: block !important; visibility: visible !important; }
         .chat-area { flex: 1; display: flex; flex-direction: column; }
         .auth-section { 
             background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%); 
@@ -609,7 +615,7 @@ function getHTML() {
                 <div class="auth-section" id="authSection">
                     <div class="input-group">
                         <label>访问密码</label>
-                        <input type="password" id="passwordInput" placeholder="请输入访问密码">
+                        <input type="password" id="passwordInput" placeholder="请输入访问密码" onkeydown="handlePasswordKeyDown(event)">
                     </div>
                     <button class="btn" onclick="authenticate()">验证</button>
                 </div>
@@ -629,7 +635,7 @@ function getHTML() {
             <div class="chat-area">
                 <div class="messages" id="messages">
                     <div class="message assistant">
-                        <div class="message-content">👋 欢迎使用CF AI Chat！请先输入密码验证身份，然后选择一个AI模型开始聊天。</div>
+                        <div class="message-content">👋 欢迎使用CF AI Chat！请先输入密码验证身份，然后选择一个AI模型开始聊天。<br><br>🇨🇳 所有AI模型都已配置为使用中文回复，无论您使用什么语言提问，AI都会用中文回答您的问题。</div>
                     </div>
                 </div>
                 <div class="loading" id="loading">🤔 AI正在思考中...</div>
@@ -675,6 +681,22 @@ function getHTML() {
         // 定期检查作者信息
         setInterval(verifyAuthorDisplay, 3000);
         
+        // 全局错误处理
+        window.onerror = function(message, source, lineno, colno, error) {
+            console.error('JavaScript错误:', { message, source, lineno, colno, error });
+            return false; // 不阻止默认错误处理
+        };
+        
+        // 保护侧边栏显示
+        function protectSidebar() {
+            const sidebar = document.querySelector('.sidebar');
+            if (sidebar) {
+                sidebar.style.display = 'block';
+                sidebar.style.visibility = 'visible';
+            }
+        }
+        setInterval(protectSidebar, 1000);
+        
         let isAuthenticated = false, currentPassword = '', models = {}, chatHistory = [], currentModel = '';
         window.onload = async function() {
             // 首次验证作者信息
@@ -705,7 +727,7 @@ function getHTML() {
                 if (currentModel && currentModel !== selectedModel) {
                     chatHistory = [];
                     const messagesDiv = document.getElementById('messages');
-                    messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换模型，正在加载历史记录...</div></div>';
+                    messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换模型，正在加载历史记录...<br><br>🇨🇳 新模型已配置为中文回复模式。</div></div>';
                 }
                 
                 currentModel = selectedModel;
@@ -855,6 +877,9 @@ function getHTML() {
         }
         function handleKeyDown(event) {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+        }
+        function handlePasswordKeyDown(event) {
+            if (event.key === 'Enter') { event.preventDefault(); authenticate(); }
         }
         function showError(message) {
             const div = document.createElement('div');
