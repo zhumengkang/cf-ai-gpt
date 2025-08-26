@@ -170,7 +170,7 @@ const MODEL_CONFIG = {
     "max_output": 4096,
     "input_price": 0.35,
     "output_price": 0.56,
-    "use_messages": true,
+    "use_prompt": true,
     "features": ["多语言", "文化理解", "翻译"]
   }
 };
@@ -274,6 +274,7 @@ async function handleChat(request, env, corsHeaders) {
       modelKey: model, 
       modelName: selectedModel.name,
       useInput: selectedModel.use_input,
+      usePrompt: selectedModel.use_prompt,
       useMessages: selectedModel.use_messages 
     });
     
@@ -303,6 +304,21 @@ async function handleChat(request, env, corsHeaders) {
         console.log(`${selectedModel.name} 最优参数 (input):`, JSON.stringify(optimalParams, null, 2));
         
         response = await env.AI.run(selectedModel.id, inputParams);
+      } else if (selectedModel.use_prompt) {
+        // Gemma等模型使用prompt参数
+        const promptText = recentHistory.length > 0 
+          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
+          : `你是一个友善的AI助手，请用中文回答问题。\n\n问题: ${message}`;
+        
+        const optimalParams = getModelOptimalParams(model, selectedModel.id);
+        const promptParams = {
+          prompt: promptText,
+          ...optimalParams
+        };
+        
+        console.log(`${selectedModel.name} 最优参数 (prompt):`, JSON.stringify(optimalParams, null, 2));
+        
+        response = await env.AI.run(selectedModel.id, promptParams);
       } else if (selectedModel.use_messages) {
         // 使用messages参数的模型
         const messages = [
@@ -369,14 +385,22 @@ async function handleChat(request, env, corsHeaders) {
         reply = response.message;
       } else {
         console.error('未知的响应格式:', response);
-        // 尝试从对象中提取任何字符串值
+        // 检查是否是以resp_开头的响应ID（这种情况下需要重新调用）
         const possibleContent = Object.values(response).find(val => 
-          typeof val === 'string' && val.length > 0 && val.length < 10000
+          typeof val === 'string' && val.length > 0 && val.length < 10000 && !val.startsWith('resp_')
         );
         if (possibleContent) {
           reply = possibleContent;
         } else {
-          reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}。原始内容: ${JSON.stringify(response).substring(0, 500)}...`;
+          // 如果所有字符串值都是resp_开头的ID，说明是异步响应，需要特殊处理
+          const respIds = Object.values(response).filter(val => 
+            typeof val === 'string' && val.startsWith('resp_')
+          );
+          if (respIds.length > 0) {
+            reply = `抱歉，AI模型返回了异步响应ID (${respIds[0]})，但当前不支持异步处理。请稍后重试或联系管理员。`;
+          } else {
+            reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}。原始内容: ${JSON.stringify(response).substring(0, 500)}...`;
+          }
         }
       }
       
@@ -627,21 +651,25 @@ function getHTML() {
         };
         
         function verifyAuthorDisplay() {
-            const authorElements = document.querySelectorAll('.author-info strong');
-            if (authorElements.length === 0) {
-                alert('作者信息已被删除，服务将停止运行！');
-                document.body.innerHTML = '<div style="text-align:center;margin-top:50px;"><h1>❌ 服务已停止</h1><p>作者信息被篡改，请保持原始作者信息：YouTube：康康的订阅天地</p></div>';
-                return false;
-            }
-            
-            for (let element of authorElements) {
-                if (!element.textContent.includes('YouTube：康康的订阅天地')) {
-                    alert('作者信息已被篡改，服务将停止运行！');
-                    document.body.innerHTML = '<div style="text-align:center;margin-top:50px;"><h1>❌ 服务已停止</h1><p>作者信息被篡改，请保持原始作者信息：YouTube：康康的订阅天地</p></div>';
-                    return false;
+            try {
+                const authorElements = document.querySelectorAll('.author-info strong');
+                if (authorElements.length === 0) {
+                    console.warn('作者信息元素未找到，可能页面还未完全加载');
+                    return true; // 页面加载期间暂时允许通过
                 }
+                
+                for (let element of authorElements) {
+                    if (!element.textContent.includes('YouTube：康康的订阅天地')) {
+                        alert('作者信息已被篡改，服务将停止运行！');
+                        document.body.innerHTML = '<div style="text-align:center;margin-top:50px;"><h1>❌ 服务已停止</h1><p>作者信息被篡改，请保持原始作者信息：YouTube：康康的订阅天地</p></div>';
+                        return false;
+                    }
+                }
+                return true;
+            } catch (error) {
+                console.error('验证作者信息时发生错误:', error);
+                return true; // 发生错误时暂时允许通过，避免破坏页面功能
             }
-            return true;
         }
         
         // 定期检查作者信息
@@ -667,38 +695,50 @@ function getHTML() {
             }
         }
         function updateModelInfo() {
-            const select = document.getElementById('modelSelect');
-            const infoDiv = document.getElementById('modelInfo');
-            const selectedModel = select.value;
-            if (!selectedModel) { infoDiv.innerHTML = '请先选择一个AI模型'; return; }
-            
-            // 切换模型时加载对应模型的历史记录
-            if (currentModel && currentModel !== selectedModel) {
-                chatHistory = [];
-                const messagesDiv = document.getElementById('messages');
-                messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换模型，正在加载历史记录...</div></div>';
-            }
-            
-            currentModel = selectedModel;
-            const model = models[selectedModel];
-            const features = model.features ? model.features.join(' • ') : '';
-            infoDiv.innerHTML = \`
-                <strong>\${model.name}</strong><br>
-                📝 \${model.description}<br><br>
-                🎯 <strong>特色功能:</strong><br>
-                \${features}<br><br>
-                💰 <strong>价格:</strong><br>
-                • 输入: $\${model.input_price}/百万tokens<br>
-                • 输出: $\${model.output_price}/百万tokens<br><br>
-                📏 <strong>限制:</strong><br>
-                • 上下文: \${model.context.toLocaleString()} tokens<br>
-                • 最大输出: \${model.max_output.toLocaleString()} tokens
-            \`;
-            if (isAuthenticated) {
-                document.getElementById('messageInput').disabled = false;
-                document.getElementById('sendBtn').disabled = false;
-                // 切换模型后自动加载对应历史记录
-                loadHistory();
+            try {
+                const select = document.getElementById('modelSelect');
+                const infoDiv = document.getElementById('modelInfo');
+                const selectedModel = select.value;
+                if (!selectedModel) { infoDiv.innerHTML = '请先选择一个AI模型'; return; }
+                
+                // 切换模型时加载对应模型的历史记录
+                if (currentModel && currentModel !== selectedModel) {
+                    chatHistory = [];
+                    const messagesDiv = document.getElementById('messages');
+                    messagesDiv.innerHTML = '<div class="message assistant"><div class="message-content">🔄 已切换模型，正在加载历史记录...</div></div>';
+                }
+                
+                currentModel = selectedModel;
+                const model = models[selectedModel];
+                if (!model) {
+                    infoDiv.innerHTML = '模型信息加载失败';
+                    return;
+                }
+                const features = model.features ? model.features.join(' • ') : '';
+                infoDiv.innerHTML = \`
+                    <strong>\${model.name}</strong><br>
+                    📝 \${model.description}<br><br>
+                    🎯 <strong>特色功能:</strong><br>
+                    \${features}<br><br>
+                    💰 <strong>价格:</strong><br>
+                    • 输入: $\${model.input_price}/百万tokens<br>
+                    • 输出: $\${model.output_price}/百万tokens<br><br>
+                    📏 <strong>限制:</strong><br>
+                    • 上下文: \${model.context.toLocaleString()} tokens<br>
+                    • 最大输出: \${model.max_output.toLocaleString()} tokens
+                \`;
+                if (isAuthenticated) {
+                    document.getElementById('messageInput').disabled = false;
+                    document.getElementById('sendBtn').disabled = false;
+                    // 切换模型后自动加载对应历史记录
+                    loadHistory();
+                }
+            } catch (error) {
+                console.error('更新模型信息时发生错误:', error);
+                const infoDiv = document.getElementById('modelInfo');
+                if (infoDiv) {
+                    infoDiv.innerHTML = '更新模型信息时发生错误';
+                }
             }
         }
         async function authenticate() {
@@ -730,28 +770,35 @@ function getHTML() {
             }
         }
         async function sendMessage() {
-            if (!verifyAuthorDisplay()) return;
-            if (!isAuthenticated || !currentModel) { showError('请先验证身份并选择模型'); return; }
-            const input = document.getElementById('messageInput');
-            const message = input.value.trim();
-            if (!message) return;
-            addMessage('user', message); input.value = '';
-            chatHistory.push({ role: 'user', content: message, timestamp: new Date() });
-            document.getElementById('loading').style.display = 'block';
-            document.getElementById('sendBtn').disabled = true;
             try {
-                const response = await fetch('/api/chat', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message, model: currentModel, password: currentPassword, history: chatHistory.slice(-10) })
-                });
-                const data = await response.json();
-                if (response.ok) {
-                    addMessage('assistant', data.reply, data.model, data.usage);
-                    chatHistory.push({ role: 'assistant', content: data.reply, timestamp: new Date(), model: data.model });
-                    await saveHistory();
-                } else { showError(data.error || '发送消息失败'); }
-            } catch (error) { showError('网络错误: ' + error.message); }
-            finally {
+                if (!verifyAuthorDisplay()) return;
+                if (!isAuthenticated || !currentModel) { showError('请先验证身份并选择模型'); return; }
+                const input = document.getElementById('messageInput');
+                const message = input.value.trim();
+                if (!message) return;
+                addMessage('user', message); input.value = '';
+                chatHistory.push({ role: 'user', content: message, timestamp: new Date() });
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('sendBtn').disabled = true;
+                try {
+                    const response = await fetch('/api/chat', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message, model: currentModel, password: currentPassword, history: chatHistory.slice(-10) })
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        addMessage('assistant', data.reply, data.model, data.usage);
+                        chatHistory.push({ role: 'assistant', content: data.reply, timestamp: new Date(), model: data.model });
+                        await saveHistory();
+                    } else { showError(data.error || '发送消息失败'); }
+                } catch (error) { showError('网络错误: ' + error.message); }
+                finally {
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('sendBtn').disabled = false;
+                }
+            } catch (error) {
+                console.error('发送消息时发生意外错误:', error);
+                showError('发送消息时发生意外错误: ' + error.message);
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('sendBtn').disabled = false;
             }
