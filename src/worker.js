@@ -391,19 +391,33 @@ async function handleChat(request, env, corsHeaders) {
         reply = response.message;
       } else {
         console.error('未知的响应格式:', response);
-        // 检查是否是以resp_开头的响应ID（这种情况下需要重新调用）
-        const possibleContent = Object.values(response).find(val => 
-          typeof val === 'string' && val.length > 0 && val.length < 10000 && !val.startsWith('resp_')
+        // 检查是否包含模型ID或其他无效内容
+        const allValues = Object.values(response);
+        const possibleContent = allValues.find(val => 
+          typeof val === 'string' && 
+          val.length > 10 && 
+          val.length < 10000 && 
+          !val.startsWith('resp_') &&
+          !val.startsWith('@cf/') &&  // 过滤模型ID
+          !val.includes('openai') &&  // 过滤包含模型信息的字符串
+          !val.includes('gpt-oss')
         );
+        
         if (possibleContent) {
           reply = possibleContent;
         } else {
-          // 如果所有字符串值都是resp_开头的ID，说明是异步响应，需要特殊处理
-          const respIds = Object.values(response).filter(val => 
+          // 如果找不到有效内容，检查是否是异步响应或模型ID
+          const respIds = allValues.filter(val => 
             typeof val === 'string' && val.startsWith('resp_')
           );
+          const modelIds = allValues.filter(val => 
+            typeof val === 'string' && val.startsWith('@cf/')
+          );
+          
           if (respIds.length > 0) {
             reply = `抱歉，AI模型返回了异步响应ID (${respIds[0]})，但当前不支持异步处理。请稍后重试或联系管理员。`;
+          } else if (modelIds.length > 0) {
+            reply = `抱歉，AI模型只返回了模型ID (${modelIds[0]}) 而没有生成实际内容。这可能是因为输入过短或模型配置问题。请尝试提供更详细的问题或稍后重试。`;
           } else {
             reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}。原始内容: ${JSON.stringify(response).substring(0, 500)}...`;
           }
@@ -427,8 +441,8 @@ async function handleChat(request, env, corsHeaders) {
         }
       }
       
-      // 为回复中的代码添加格式化
-      reply = formatCodeBlocks(reply);
+      // 为回复中的Markdown内容添加格式化
+      reply = formatMarkdown(reply);
     } else {
       console.error('完全意外的响应:', response);
       reply = `抱歉，AI模型返回了完全意外的格式。响应类型: ${typeof response}`;
@@ -509,8 +523,8 @@ async function saveHistory(request, env, corsHeaders) {
   }
 }
 
-// 格式化代码块
-function formatCodeBlocks(text) {
+// 格式化Markdown内容
+function formatMarkdown(text) {
   // 转义HTML特殊字符
   function escapeHtml(str) {
     return str.replace(/&/g, '&amp;')
@@ -537,6 +551,39 @@ function formatCodeBlocks(text) {
     return `<code class="inline-code">${escapeHtml(code)}</code>`;
   });
   
+  // 处理标题
+  text = text.replace(/^### (.*$)/gim, '<h3 class="md-h3">$1</h3>');
+  text = text.replace(/^## (.*$)/gim, '<h2 class="md-h2">$1</h2>');
+  text = text.replace(/^# (.*$)/gim, '<h1 class="md-h1">$1</h1>');
+  
+  // 处理粗体
+  text = text.replace(/\*\*(.*?)\*\*/g, '<strong class="md-bold">$1</strong>');
+  text = text.replace(/__(.*?)__/g, '<strong class="md-bold">$1</strong>');
+  
+  // 处理斜体
+  text = text.replace(/\*(.*?)\*/g, '<em class="md-italic">$1</em>');
+  text = text.replace(/_(.*?)_/g, '<em class="md-italic">$1</em>');
+  
+  // 处理无序列表
+  text = text.replace(/^\* (.*$)/gim, '<li class="md-li">$1</li>');
+  text = text.replace(/^- (.*$)/gim, '<li class="md-li">$1</li>');
+  
+  // 处理有序列表
+  text = text.replace(/^\d+\. (.*$)/gim, '<li class="md-li-ordered">$1</li>');
+  
+  // 包装连续的列表项
+  text = text.replace(/(<li class="md-li">.*<\/li>)/s, '<ul class="md-ul">$1</ul>');
+  text = text.replace(/(<li class="md-li-ordered">.*<\/li>)/s, '<ol class="md-ol">$1</ol>');
+  
+  // 处理引用
+  text = text.replace(/^> (.*$)/gim, '<blockquote class="md-blockquote">$1</blockquote>');
+  
+  // 处理链接
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="md-link">$1</a>');
+  
+  // 处理换行
+  text = text.replace(/\n/g, '<br>');
+  
   return text;
 }
 
@@ -556,7 +603,7 @@ function getHTML() {
         .author-info p { margin: 0; font-size: 14px; opacity: 0.9; }
         .author-info strong { color: #ffd700; }
         .main-content { display: flex; flex: 1; overflow: hidden; }
-        .sidebar { width: 300px; background: #f8fafc; border-right: 1px solid #e2e8f0; padding: 20px; overflow-y: auto; display: block !important; visibility: visible !important; }
+        .sidebar { width: 300px; min-width: 300px; background: #f8fafc; border-right: 1px solid #e2e8f0; padding: 20px; overflow-y: auto; display: block !important; visibility: visible !important; flex-shrink: 0; }
         .chat-area { flex: 1; display: flex; flex-direction: column; }
         .auth-section { 
             background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%); 
@@ -599,6 +646,20 @@ function getHTML() {
         code { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 13px; }
         .inline-code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 13px; }
         .code-block code { background: none; padding: 0; color: #1f2937; }
+        
+        /* Markdown 样式 */
+        .md-h1 { font-size: 24px; font-weight: bold; color: #1f2937; margin: 20px 0 10px 0; border-bottom: 2px solid #e5e7eb; padding-bottom: 5px; }
+        .md-h2 { font-size: 20px; font-weight: bold; color: #374151; margin: 18px 0 8px 0; border-bottom: 1px solid #e5e7eb; padding-bottom: 3px; }
+        .md-h3 { font-size: 16px; font-weight: bold; color: #4b5563; margin: 15px 0 6px 0; }
+        .md-bold { font-weight: bold; color: #1f2937; }
+        .md-italic { font-style: italic; color: #4b5563; }
+        .md-ul { margin: 10px 0; padding-left: 20px; }
+        .md-ol { margin: 10px 0; padding-left: 20px; }
+        .md-li { margin: 5px 0; list-style-type: disc; }
+        .md-li-ordered { margin: 5px 0; list-style-type: decimal; }
+        .md-blockquote { background: #f3f4f6; border-left: 4px solid #6b7280; padding: 10px 15px; margin: 10px 0; font-style: italic; color: #4b5563; }
+        .md-link { color: #3b82f6; text-decoration: underline; }
+        .md-link:hover { color: #1d4ed8; }
     </style>
 </head>
 <body>
