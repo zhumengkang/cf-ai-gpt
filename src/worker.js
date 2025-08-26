@@ -302,8 +302,11 @@ async function handleChat(request, env, corsHeaders) {
         };
         
         console.log(`${selectedModel.name} 最优参数 (input):`, JSON.stringify(optimalParams, null, 2));
+        console.log(`${selectedModel.name} 完整请求参数:`, JSON.stringify(inputParams, null, 2));
         
         response = await env.AI.run(selectedModel.id, inputParams);
+        console.log(`${selectedModel.name} 原始响应类型:`, typeof response);
+        console.log(`${selectedModel.name} 原始响应结构:`, Object.keys(response || {}));
       } else if (selectedModel.use_prompt) {
         // Gemma等模型使用prompt参数
         const promptText = recentHistory.length > 0 
@@ -366,12 +369,60 @@ async function handleChat(request, env, corsHeaders) {
       reply = response;
     } else if (response && typeof response === 'object') {
       // 特殊处理GPT模型的响应格式
-      if (selectedModel.use_input && response.result) {
-        // GPT模型通常返回 { result: "实际内容" } 格式
-        reply = response.result;
-      } else if (selectedModel.use_input && response.response) {
-        // 有些GPT模型可能返回 { response: "实际内容" } 格式
-        reply = response.response;
+      if (selectedModel.use_input) {
+        console.log('GPT模型响应详细分析:', {
+          responseType: typeof response,
+          isObject: typeof response === 'object',
+          keys: response ? Object.keys(response) : [],
+          values: response ? Object.values(response).map(v => ({ type: typeof v, length: typeof v === 'string' ? v.length : 'N/A', preview: typeof v === 'string' ? v.substring(0, 100) + '...' : v })) : []
+        });
+        
+        // 根据API文档，GPT模型返回的是一个对象，可能包含多种字段
+        // 尝试按优先级提取内容
+        if (typeof response === 'string') {
+          reply = response;
+        } else if (response && typeof response === 'object') {
+          // 检查常见的响应字段
+          const possibleFields = ['result', 'response', 'content', 'text', 'output', 'answer', 'completion', 'message', 'data'];
+          
+          for (const field of possibleFields) {
+            if (response[field] && typeof response[field] === 'string' && response[field].length > 0) {
+              console.log(`GPT模型在字段 "${field}" 中找到内容:`, response[field].substring(0, 200));
+              reply = response[field];
+              break;
+            }
+          }
+          
+          // 检查OpenAI标准格式 - choices数组
+          if (!reply && response.choices && Array.isArray(response.choices) && response.choices.length > 0) {
+            console.log('检测到OpenAI choices格式');
+            const choice = response.choices[0];
+            if (choice.message && choice.message.content) {
+              console.log('在choices[0].message.content中找到内容');
+              reply = choice.message.content;
+            } else if (choice.text) {
+              console.log('在choices[0].text中找到内容');
+              reply = choice.text;
+            }
+          }
+          
+          // 如果没有找到标准字段，检查是否有嵌套对象
+          if (!reply) {
+            for (const [key, value] of Object.entries(response)) {
+              if (value && typeof value === 'object' && !Array.isArray(value)) {
+                console.log(`检查嵌套对象 "${key}":`, Object.keys(value));
+                for (const nestedField of possibleFields) {
+                  if (value[nestedField] && typeof value[nestedField] === 'string' && value[nestedField].length > 0) {
+                    console.log(`在嵌套对象 "${key}.${nestedField}" 中找到内容`);
+                    reply = value[nestedField];
+                    break;
+                  }
+                }
+                if (reply) break;
+              }
+            }
+          }
+        }
       } else if (typeof response.response === 'string') {
         reply = response.response;
       } else if (typeof response.text === 'string') {
@@ -415,7 +466,12 @@ async function handleChat(request, env, corsHeaders) {
           );
           
           if (respIds.length > 0) {
-            reply = `抱歉，AI模型返回了异步响应ID (${respIds[0]})，但当前不支持异步处理。请稍后重试或联系管理员。`;
+            console.log(`检测到异步响应ID: ${respIds[0]}`);
+            if (selectedModel.use_input) {
+              reply = `抱歉，GPT模型返回了异步响应ID (${respIds[0]})。这通常表示请求正在处理中，但当前版本不支持异步轮询。建议：1) 简化您的问题 2) 稍后重试 3) 尝试其他模型。`;
+            } else {
+              reply = `抱歉，AI模型返回了异步响应ID (${respIds[0]})，但当前不支持异步处理。请稍后重试或联系管理员。`;
+            }
           } else if (modelIds.length > 0) {
             reply = `抱歉，AI模型只返回了模型ID (${modelIds[0]}) 而没有生成实际内容。这可能是因为输入过短或模型配置问题。请尝试提供更详细的问题或稍后重试。`;
           } else {
@@ -596,10 +652,11 @@ function getHTML() {
     <title>CF AI Chat</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); overflow: hidden; display: flex; flex-direction: column; height: 90vh; }
+        body { font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); height: 100vh; overflow: hidden; }
+        .container { width: 100vw; height: 100vh; background: white; display: flex; flex-direction: column; }
         .header { background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: white; padding: 20px; text-align: center; }
-        .author-info { margin-top: 10px; padding: 8px 16px; background: rgba(255,255,255,0.1); border-radius: 20px; display: inline-block; }
+        .author-info { margin-top: 10px; padding: 8px 16px; background: rgba(255,255,255,0.1); border-radius: 20px; display: inline-block; cursor: pointer; transition: all 0.3s ease; }
+        .author-info:hover { background: rgba(255,255,255,0.2); transform: translateY(-2px); }
         .author-info p { margin: 0; font-size: 14px; opacity: 0.9; }
         .author-info strong { color: #ffd700; }
         .main-content { display: flex; flex: 1; overflow: hidden; }
@@ -667,7 +724,7 @@ function getHTML() {
         <div class="header">
             <h1>🤖 CF AI Chat</h1>
             <p>支持多模型切换的智能聊天助手</p>
-            <div class="author-info">
+            <div class="author-info" onclick="window.open('https://www.youtube.com/@%E5%BA%B7%E5%BA%B7%E7%9A%84V2Ray%E4%B8%8EClash', '_blank')">
                 <p>📺 作者：<strong>YouTube：康康的订阅天地</strong></p>
             </div>
         </div>
