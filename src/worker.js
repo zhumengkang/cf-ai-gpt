@@ -290,18 +290,21 @@ async function handleChat(request, env, corsHeaders) {
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
       
       if (selectedModel.use_input) {
-        // GPT模型使用input参数
-        const inputText = recentHistory.length > 0 
-          ? `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
-          : `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n问题: ${message}\n\n请用中文回答:`;
+        // GPT模型使用instructions + input参数结构
+        const instructions = "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。";
+        
+        const userInput = recentHistory.length > 0 
+          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
+          : message;
         
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const inputParams = {
-          input: inputText,
+          instructions: instructions,
+          input: userInput,
           ...optimalParams
         };
         
-        console.log(`${selectedModel.name} 最优参数 (input):`, JSON.stringify(optimalParams, null, 2));
+        console.log(`${selectedModel.name} 最优参数:`, JSON.stringify(optimalParams, null, 2));
         console.log(`${selectedModel.name} 完整请求参数:`, JSON.stringify(inputParams, null, 2));
         
         response = await env.AI.run(selectedModel.id, inputParams);
@@ -498,7 +501,12 @@ async function handleChat(request, env, corsHeaders) {
       }
       
       // 为回复中的Markdown内容添加格式化
-      reply = formatMarkdown(reply);
+      if (reply && typeof reply === 'string') {
+        reply = formatMarkdown(reply);
+      } else {
+        console.error('reply不是有效的字符串:', { reply, type: typeof reply });
+        reply = reply || '抱歉，AI模型没有返回有效的回复内容。';
+      }
     } else {
       console.error('完全意外的响应:', response);
       reply = `抱歉，AI模型返回了完全意外的格式。响应类型: ${typeof response}`;
@@ -581,8 +589,15 @@ async function saveHistory(request, env, corsHeaders) {
 
 // 格式化Markdown内容
 function formatMarkdown(text) {
+  // 安全检查
+  if (!text || typeof text !== 'string') {
+    console.warn('formatMarkdown收到无效输入:', { text, type: typeof text });
+    return text || '';
+  }
+  
   // 转义HTML特殊字符
   function escapeHtml(str) {
+    if (!str || typeof str !== 'string') return '';
     return str.replace(/&/g, '&amp;')
               .replace(/</g, '&lt;')
               .replace(/>/g, '&gt;')
