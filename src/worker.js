@@ -290,17 +290,14 @@ async function handleChat(request, env, corsHeaders) {
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
       
       if (selectedModel.use_input) {
-        // GPT模型使用instructions + input参数结构
-        const instructions = "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。";
-        
-        const userInput = recentHistory.length > 0 
-          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
-          : message;
+        // GPT模型只使用input参数，根据官方文档
+        const inputText = recentHistory.length > 0 
+          ? `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
+          : `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n问题: ${message}\n\n请用中文回答:`;
         
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const inputParams = {
-          instructions: instructions,
-          input: userInput,
+          input: inputText,
           ...optimalParams
         };
         
@@ -310,6 +307,7 @@ async function handleChat(request, env, corsHeaders) {
         response = await env.AI.run(selectedModel.id, inputParams);
         console.log(`${selectedModel.name} 原始响应类型:`, typeof response);
         console.log(`${selectedModel.name} 原始响应结构:`, Object.keys(response || {}));
+        console.log(`${selectedModel.name} 完整响应内容:`, JSON.stringify(response, null, 2));
       } else if (selectedModel.use_prompt) {
         // Gemma等模型使用prompt参数
         const promptText = recentHistory.length > 0 
@@ -377,51 +375,47 @@ async function handleChat(request, env, corsHeaders) {
           responseType: typeof response,
           isObject: typeof response === 'object',
           keys: response ? Object.keys(response) : [],
-          values: response ? Object.values(response).map(v => ({ type: typeof v, length: typeof v === 'string' ? v.length : 'N/A', preview: typeof v === 'string' ? v.substring(0, 100) + '...' : v })) : []
+          stringValues: response ? Object.entries(response).filter(([k, v]) => typeof v === 'string').map(([k, v]) => ({ key: k, length: v.length, preview: v.substring(0, 200) + '...' })) : []
         });
         
-        // 根据API文档，GPT模型返回的是一个对象，可能包含多种字段
-        // 尝试按优先级提取内容
+        // 根据官方文档，GPT模型可能返回字符串或对象
         if (typeof response === 'string') {
+          console.log('GPT模型返回直接字符串');
           reply = response;
         } else if (response && typeof response === 'object') {
-          // 检查常见的响应字段
-          const possibleFields = ['result', 'response', 'content', 'text', 'output', 'answer', 'completion', 'message', 'data'];
+          // 按照Cloudflare Workers AI的常见响应格式检查
+          const possibleFields = [
+            'response',    // 最常见的字段
+            'result',      // 结果字段
+            'content',     // 内容字段
+            'text',        // 文本字段
+            'output',      // 输出字段
+            'answer',      // 答案字段
+            'completion',  // 完成字段
+            'message',     // 消息字段
+            'data'         // 数据字段
+          ];
           
+          // 遍历所有可能的字段
           for (const field of possibleFields) {
-            if (response[field] && typeof response[field] === 'string' && response[field].length > 0) {
-              console.log(`GPT模型在字段 "${field}" 中找到内容:`, response[field].substring(0, 200));
-              reply = response[field];
-              break;
+            if (response.hasOwnProperty(field) && response[field]) {
+              const value = response[field];
+              if (typeof value === 'string' && value.trim().length > 0) {
+                console.log(`✅ GPT模型在字段 "${field}" 中找到内容 (${value.length} 字符):`, value.substring(0, 200) + '...');
+                reply = value.trim();
+                break;
+              }
             }
           }
           
-          // 检查OpenAI标准格式 - choices数组
-          if (!reply && response.choices && Array.isArray(response.choices) && response.choices.length > 0) {
-            console.log('检测到OpenAI choices格式');
-            const choice = response.choices[0];
-            if (choice.message && choice.message.content) {
-              console.log('在choices[0].message.content中找到内容');
-              reply = choice.message.content;
-            } else if (choice.text) {
-              console.log('在choices[0].text中找到内容');
-              reply = choice.text;
-            }
-          }
-          
-          // 如果没有找到标准字段，检查是否有嵌套对象
+          // 如果还没找到，检查所有字符串类型的值
           if (!reply) {
+            console.log('在所有字段中搜索字符串内容...');
             for (const [key, value] of Object.entries(response)) {
-              if (value && typeof value === 'object' && !Array.isArray(value)) {
-                console.log(`检查嵌套对象 "${key}":`, Object.keys(value));
-                for (const nestedField of possibleFields) {
-                  if (value[nestedField] && typeof value[nestedField] === 'string' && value[nestedField].length > 0) {
-                    console.log(`在嵌套对象 "${key}.${nestedField}" 中找到内容`);
-                    reply = value[nestedField];
-                    break;
-                  }
-                }
-                if (reply) break;
+              if (typeof value === 'string' && value.trim().length > 0) {
+                console.log(`🔍 在字段 "${key}" 中发现字符串内容:`, value.substring(0, 200) + '...');
+                reply = value.trim();
+                break;
               }
             }
           }
