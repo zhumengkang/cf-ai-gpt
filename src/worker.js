@@ -298,6 +298,7 @@ async function handleChat(request, env, corsHeaders) {
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const inputParams = {
           input: inputText,
+          stream: false,  // 强制关闭流式响应
           ...optimalParams
         };
         
@@ -465,7 +466,15 @@ async function handleChat(request, env, corsHeaders) {
           if (respIds.length > 0) {
             console.log(`检测到异步响应ID: ${respIds[0]}`);
             if (selectedModel.use_input) {
-              reply = `抱歉，GPT模型返回了异步响应ID (${respIds[0]})。这通常表示请求正在处理中，但当前版本不支持异步轮询。建议：1) 简化您的问题 2) 稍后重试 3) 尝试其他模型。`;
+              // 对于GPT模型，尝试轮询异步结果
+              console.log('开始轮询GPT异步响应...');
+              try {
+                reply = await pollAsyncResponse(respIds[0], env);
+                console.log('异步轮询成功获取结果:', reply?.substring(0, 200) + '...');
+              } catch (pollError) {
+                console.error('异步轮询失败:', pollError);
+                reply = `GPT模型正在异步处理您的请求 (${respIds[0]})。轮询失败: ${pollError.message}。请稍后重试或简化问题。`;
+              }
             } else {
               reply = `抱歉，AI模型返回了异步响应ID (${respIds[0]})，但当前不支持异步处理。请稍后重试或联系管理员。`;
             }
@@ -579,6 +588,79 @@ async function saveHistory(request, env, corsHeaders) {
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
     });
   }
+}
+
+// 轮询异步响应结果
+async function pollAsyncResponse(responseId, env, maxAttempts = 10, interval = 2000) {
+  console.log(`开始轮询异步响应 ${responseId}，最多尝试 ${maxAttempts} 次`);
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      console.log(`轮询尝试 ${attempt}/${maxAttempts}`);
+      
+      // 方法1: 尝试直接获取批处理结果
+      let pollResponse;
+      try {
+        // 使用批处理API获取结果
+        pollResponse = await env.AI.run('@cf/batch/get-result', {
+          id: responseId
+        });
+        console.log('批处理API响应:', JSON.stringify(pollResponse, null, 2));
+      } catch (batchError) {
+        console.log('批处理API失败，尝试直接查询:', batchError.message);
+        // 方法2: 直接查询原模型（可能Cloudflare会自动返回缓存结果）
+        pollResponse = await env.AI.run('@cf/openai/gpt-oss-120b', {
+          input: `获取响应ID ${responseId} 的结果`
+        });
+      }
+      
+      console.log(`轮询响应 ${attempt}:`, JSON.stringify(pollResponse, null, 2));
+      
+      // 检查是否获取到了实际内容
+      if (pollResponse && typeof pollResponse === 'object') {
+        // 检查是否仍然是异步响应
+        const pollRespIds = Object.values(pollResponse).filter(val => 
+          typeof val === 'string' && val.startsWith('resp_')
+        );
+        
+        if (pollRespIds.length === 0) {
+          // 不再是异步响应，尝试提取内容
+          const possibleFields = ['response', 'result', 'content', 'text', 'output', 'answer', 'completion', 'message', 'data'];
+          
+          for (const field of possibleFields) {
+            if (pollResponse[field] && typeof pollResponse[field] === 'string' && pollResponse[field].trim().length > 0) {
+              console.log(`✅ 轮询成功！在字段 "${field}" 中找到内容`);
+              return pollResponse[field].trim();
+            }
+          }
+          
+          // 如果没有找到标准字段，搜索所有字符串值
+          for (const [key, value] of Object.entries(pollResponse)) {
+            if (typeof value === 'string' && value.trim().length > 0) {
+              console.log(`✅ 轮询成功！在字段 "${key}" 中找到内容`);
+              return value.trim();
+            }
+          }
+        }
+      }
+      
+      // 如果还是异步响应或没有内容，等待后继续
+      if (attempt < maxAttempts) {
+        console.log(`等待 ${interval}ms 后进行下次轮询...`);
+        await new Promise(resolve => setTimeout(resolve, interval));
+      }
+      
+    } catch (pollError) {
+      console.error(`轮询尝试 ${attempt} 失败:`, pollError);
+      if (attempt === maxAttempts) {
+        throw new Error(`轮询失败，已尝试 ${maxAttempts} 次: ${pollError.message}`);
+      }
+      // 等待后重试
+      await new Promise(resolve => setTimeout(resolve, interval));
+    }
+  }
+  
+  throw new Error(`轮询超时，已尝试 ${maxAttempts} 次，未能获取到结果`);
 }
 
 // 格式化Markdown内容
