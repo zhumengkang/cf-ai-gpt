@@ -28,9 +28,12 @@ function getModelOptimalParams(modelKey, modelId) {
       return {
         ...baseParams,
         max_tokens: 8192,        // DeepSeek支持大输出
-        temperature: 0.8,        // 思维链推理需要更高创造性
-        top_p: 0.9,
-        top_k: 50
+        temperature: 0.8,        // 思维链推理需要更高创造性，范围0-5
+        top_p: 0.9,              // 范围0.001-1
+        top_k: 50,               // 范围1-50
+        repetition_penalty: 1.1, // 范围0-2
+        frequency_penalty: 0.1,  // 范围-2到2
+        presence_penalty: 0.1    // 范围-2到2
       };
       
     case 'gpt-oss-120b':
@@ -38,8 +41,11 @@ function getModelOptimalParams(modelKey, modelId) {
         ...baseParams,
         max_tokens: 4096,        // 生产级模型，平衡质量和速度
         temperature: 0.7,
-        top_p: 0.95,
-        presence_penalty: 0.1
+        // GPT模型不支持top_p和presence_penalty，只支持reasoning参数
+        reasoning: {
+          effort: "medium",
+          summary: "auto"
+        }
       };
       
     case 'gpt-oss-20b':
@@ -47,7 +53,11 @@ function getModelOptimalParams(modelKey, modelId) {
         ...baseParams,
         max_tokens: 2048,        // 低延迟模型，快速响应
         temperature: 0.6,
-        top_p: 0.9
+        // GPT模型不支持top_p，只支持reasoning参数
+        reasoning: {
+          effort: "low",         // 低延迟模型使用低effort
+          summary: "concise"
+        }
       };
       
     case 'llama-4-scout':
@@ -56,7 +66,9 @@ function getModelOptimalParams(modelKey, modelId) {
         max_tokens: 4096,        // 多模态模型，支持长输出
         temperature: 0.75,
         top_p: 0.95,
-        repeat_penalty: 1.1
+        repetition_penalty: 1.1,  // 使用正确的参数名
+        frequency_penalty: 0.1,
+        presence_penalty: 0.1
       };
       
     case 'qwen-coder':
@@ -64,8 +76,11 @@ function getModelOptimalParams(modelKey, modelId) {
         ...baseParams,
         max_tokens: 8192,        // 代码模型需要长输出
         temperature: 0.3,        // 代码生成需要低随机性
-        top_p: 0.8,
-        stop: ["```\n\n", "---"]
+        top_p: 0.8,              // 范围0-2，Qwen支持
+        top_k: 30,
+        repetition_penalty: 1.1,
+        frequency_penalty: 0.1,
+        presence_penalty: 0.1
       };
       
     case 'gemma-3':
@@ -73,8 +88,11 @@ function getModelOptimalParams(modelKey, modelId) {
         ...baseParams,
         max_tokens: 4096,        // 多语言模型
         temperature: 0.8,
-        top_p: 0.9,
-        top_k: 40
+        top_p: 0.9,              // 范围0-2，Gemma支持
+        top_k: 40,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.1,
+        presence_penalty: 0.1
       };
       
     default:
@@ -107,6 +125,7 @@ const MODEL_CONFIG = {
     "input_price": 0.35,
     "output_price": 0.75,
     "use_messages": false,
+    "use_input": true,
     "features": ["通用对话", "文本分析", "创意写作"]
   },
   "gpt-oss-20b": {
@@ -118,6 +137,7 @@ const MODEL_CONFIG = {
     "input_price": 0.20,
     "output_price": 0.30,
     "use_messages": false,
+    "use_input": true,
     "features": ["快速响应", "实时对话", "简单任务"]
   },
   "llama-4-scout": {
@@ -250,6 +270,13 @@ async function handleChat(request, env, corsHeaders) {
 
     const selectedModel = MODEL_CONFIG[model];
     
+    console.log('处理聊天请求:', { 
+      modelKey: model, 
+      modelName: selectedModel.name,
+      useInput: selectedModel.use_input,
+      useMessages: selectedModel.use_messages 
+    });
+    
     // 构建消息历史
     const maxHistoryLength = Math.floor(selectedModel.context / 1000);
     const recentHistory = history.slice(-maxHistoryLength);
@@ -261,7 +288,22 @@ async function handleChat(request, env, corsHeaders) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
       
-      if (selectedModel.use_messages) {
+      if (selectedModel.use_input) {
+        // GPT模型使用input参数
+        const inputText = recentHistory.length > 0 
+          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
+          : `你是一个友善的AI助手，请用中文回答问题。\n\n问题: ${message}`;
+        
+        const optimalParams = getModelOptimalParams(model, selectedModel.id);
+        const inputParams = {
+          input: inputText,
+          ...optimalParams
+        };
+        
+        console.log(`${selectedModel.name} 最优参数 (input):`, JSON.stringify(optimalParams, null, 2));
+        
+        response = await env.AI.run(selectedModel.id, inputParams);
+      } else if (selectedModel.use_messages) {
         // 使用messages参数的模型
         const messages = [
           { role: "system", content: "你是一个友善的AI助手，请用中文回答问题。" },
@@ -274,7 +316,7 @@ async function handleChat(request, env, corsHeaders) {
           messages: messages.slice(-3) // 只显示最近3条消息避免日志过长
         }, null, 2));
         
-        const optimalParams = getModelOptimalParams(currentModel, selectedModel.id);
+        const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const messagesParams = {
           messages,
           ...optimalParams
@@ -284,31 +326,8 @@ async function handleChat(request, env, corsHeaders) {
         
         response = await env.AI.run(selectedModel.id, messagesParams);
       } else {
-        // 使用instructions参数的模型
-        const instructions = "你是一个友善的AI助手，请用中文回答问题。";
-        const contextualInput = recentHistory.length > 0 
-          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
-          : message;
-
-        const params = {
-          instructions: instructions,
-          input: contextualInput
-        };
-        
-        console.log('调用模型参数 (instructions):', JSON.stringify({ 
-          model: selectedModel.id, 
-          params: { instructions, input: contextualInput.substring(0, 200) + '...' }
-        }, null, 2));
-
-        const optimalParams = getModelOptimalParams(currentModel, selectedModel.id);
-        const fullParams = {
-          ...params,
-          ...optimalParams
-        };
-        
-        console.log(`${selectedModel.name} 最优参数:`, JSON.stringify(optimalParams, null, 2));
-        
-        response = await env.AI.run(selectedModel.id, fullParams);
+        // 未知模型类型
+        throw new Error(`未知的模型类型: ${selectedModel.name}。请检查模型配置。`);
       }
       
       // 清除超时定时器
