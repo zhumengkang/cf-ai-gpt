@@ -229,6 +229,11 @@ export default {
         return await saveHistory(request, env, corsHeaders);
       }
 
+      // 调试端点 - 直接返回GPT模型的原始响应
+      if (url.pathname === '/api/debug-gpt' && request.method === 'POST') {
+        return await debugGPT(request, env, corsHeaders);
+      }
+
       return new Response('Not Found', { status: 404, headers: corsHeaders });
 
     } catch (error) {
@@ -309,9 +314,27 @@ async function handleChat(request, env, corsHeaders) {
         console.log(`${selectedModel.name} 完整请求参数:`, JSON.stringify(inputParams, null, 2));
         
         response = await env.AI.run(selectedModel.id, inputParams);
-        console.log(`${selectedModel.name} 原始响应类型:`, typeof response);
-        console.log(`${selectedModel.name} 原始响应结构:`, Object.keys(response || {}));
-        console.log(`${selectedModel.name} 完整响应内容:`, JSON.stringify(response, null, 2));
+        
+        // 详细的调试信息
+        console.log('=== GPT模型响应详细调试信息 ===');
+        console.log('1. 响应类型:', typeof response);
+        console.log('2. 是否为对象:', response && typeof response === 'object');
+        console.log('3. 响应的所有键:', response ? Object.keys(response) : []);
+        console.log('4. 完整响应内容:', JSON.stringify(response, null, 2));
+        
+        // 分析每个字段
+        if (response && typeof response === 'object') {
+          console.log('5. 字段详细分析:');
+          for (const [key, value] of Object.entries(response)) {
+            console.log(`   - ${key}:`, {
+              type: typeof value,
+              isString: typeof value === 'string',
+              length: typeof value === 'string' ? value.length : 'N/A',
+              value: typeof value === 'string' ? (value.length > 100 ? value.substring(0, 100) + '...' : value) : value
+            });
+          }
+        }
+        console.log('=== 调试信息结束 ===');
       } else if (selectedModel.use_prompt) {
         // Gemma等模型使用prompt参数
         const promptText = recentHistory.length > 0 
@@ -375,12 +398,21 @@ async function handleChat(request, env, corsHeaders) {
     } else if (response && typeof response === 'object') {
       // 特殊处理GPT模型的响应格式
       if (selectedModel.use_input) {
-        console.log('GPT模型响应详细分析:', {
-          responseType: typeof response,
-          isObject: typeof response === 'object',
-          keys: response ? Object.keys(response) : [],
-          stringValues: response ? Object.entries(response).filter(([k, v]) => typeof v === 'string').map(([k, v]) => ({ key: k, length: v.length, preview: v.substring(0, 200) + '...' })) : []
-        });
+        console.log('=== 开始解析GPT模型响应 ===');
+        console.log('响应对象:', response);
+        console.log('响应类型:', typeof response);
+        
+        if (response && typeof response === 'object') {
+          console.log('所有字段:', Object.keys(response));
+          console.log('字符串字段分析:');
+          Object.entries(response).forEach(([key, value]) => {
+            if (typeof value === 'string') {
+              console.log(`  ${key}: "${value}" (长度: ${value.length})`);
+            } else {
+              console.log(`  ${key}: ${typeof value} = ${JSON.stringify(value)}`);
+            }
+          });
+        }
         
         // 根据官方文档，GPT模型可能返回字符串或对象
         if (typeof response === 'string') {
@@ -587,6 +619,59 @@ async function saveHistory(request, env, corsHeaders) {
   } catch (error) {
     console.error('Save history error:', error);
     return new Response(JSON.stringify({ error: '保存历史记录失败' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+    });
+  }
+}
+
+// GPT调试函数 - 直接返回原始响应
+async function debugGPT(request, env, corsHeaders) {
+  try {
+    const { message, password } = await request.json();
+
+    // 验证密码
+    if (password !== env.CHAT_PASSWORD) {
+      return new Response(JSON.stringify({ error: '密码错误' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+
+    console.log('=== GPT调试模式 ===');
+    console.log('输入消息:', message);
+
+    // 直接调用GPT模型
+    const response = await env.AI.run('@cf/openai/gpt-oss-120b', {
+      instructions: '你是一个智能AI助手，请用中文回答。',
+      input: message || '你好'
+    });
+
+    console.log('GPT原始响应:', response);
+    console.log('响应类型:', typeof response);
+    console.log('响应键:', response ? Object.keys(response) : []);
+
+    // 直接返回原始响应用于调试
+    return new Response(JSON.stringify({
+      debug: true,
+      originalResponse: response,
+      responseType: typeof response,
+      responseKeys: response ? Object.keys(response) : [],
+      allFields: response ? Object.entries(response).map(([k, v]) => ({
+        key: k,
+        type: typeof v,
+        value: v
+      })) : []
+    }, null, 2), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+    });
+
+  } catch (error) {
+    console.error('Debug GPT error:', error);
+    return new Response(JSON.stringify({ 
+      error: '调试GPT时发生错误: ' + error.message,
+      stack: error.stack 
+    }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
     });
