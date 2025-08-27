@@ -39,25 +39,22 @@ function getModelOptimalParams(modelKey, modelId) {
     case 'gpt-oss-120b':
       return {
         ...baseParams,
-        max_tokens: 4096,        // 生产级模型，平衡质量和速度
-        temperature: 0.7,
-        // GPT模型不支持top_p和presence_penalty，只支持reasoning参数
+        // GPT模型需要instructions参数，不支持max_tokens等参数
         reasoning: {
           effort: "medium",
           summary: "auto"
         }
+        // 注意：GPT模型不支持temperature, max_tokens等参数
       };
       
     case 'gpt-oss-20b':
       return {
         ...baseParams,
-        max_tokens: 2048,        // 低延迟模型，快速响应
-        temperature: 0.6,
-        // GPT模型不支持top_p，只支持reasoning参数
         reasoning: {
-          effort: "low",         // 低延迟模型使用低effort
+          effort: "low",
           summary: "concise"
         }
+        // 注意：GPT模型不支持temperature, max_tokens等参数
       };
       
     case 'llama-4-scout':
@@ -306,14 +303,14 @@ async function handleChat(request, env, corsHeaders) {
         const inputParams = {
           instructions: instructions,
           input: userInput,
-          stream: false,  // 强制关闭流式响应
           ...optimalParams
         };
         
-        console.log(`${selectedModel.name} 最优参数:`, JSON.stringify(optimalParams, null, 2));
-        console.log(`${selectedModel.name} 完整请求参数:`, JSON.stringify(inputParams, null, 2));
+        console.log(`${selectedModel.name} 请求参数:`, JSON.stringify(inputParams, null, 2));
         
         response = await env.AI.run(selectedModel.id, inputParams);
+        
+        console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
         
         // 详细的调试信息
         console.log('=== GPT模型响应详细调试信息 ===');
@@ -388,166 +385,22 @@ async function handleChat(request, env, corsHeaders) {
       throw new Error(`${selectedModel.name} 调用失败: ${error.message}`);
     }
 
-    // 记录原始响应用于调试
-    console.log('AI模型原始响应:', JSON.stringify(response, null, 2));
+    // 简化的响应解析逻辑
+    let reply = extractTextFromResponse(response, selectedModel);
     
-    // 提取纯文本回复
-    let reply;
-    if (typeof response === 'string') {
-      reply = response;
-    } else if (response && typeof response === 'object') {
-      // 特殊处理GPT模型的响应格式
-      if (selectedModel.use_input) {
-        console.log('=== 开始解析GPT模型响应 ===');
-        console.log('响应对象:', response);
-        console.log('响应类型:', typeof response);
-        
-        if (response && typeof response === 'object') {
-          console.log('所有字段:', Object.keys(response));
-          console.log('字符串字段分析:');
-          Object.entries(response).forEach(([key, value]) => {
-            if (typeof value === 'string') {
-              console.log(`  ${key}: "${value}" (长度: ${value.length})`);
-            } else {
-              console.log(`  ${key}: ${typeof value} = ${JSON.stringify(value)}`);
-            }
-          });
-        }
-        
-        // 根据官方文档，GPT模型可能返回字符串或对象
-        if (typeof response === 'string') {
-          console.log('GPT模型返回直接字符串');
-          reply = response;
-        } else if (response && typeof response === 'object') {
-          // 按照Cloudflare Workers AI的常见响应格式检查
-          const possibleFields = [
-            'response',    // 最常见的字段
-            'result',      // 结果字段
-            'content',     // 内容字段
-            'text',        // 文本字段
-            'output',      // 输出字段
-            'answer',      // 答案字段
-            'completion',  // 完成字段
-            'message',     // 消息字段
-            'data'         // 数据字段
-          ];
-          
-          // 遍历所有可能的字段
-          for (const field of possibleFields) {
-            if (response.hasOwnProperty(field) && response[field]) {
-              const value = response[field];
-              if (typeof value === 'string' && value.trim().length > 0) {
-                console.log(`✅ GPT模型在字段 "${field}" 中找到内容 (${value.length} 字符):`, value.substring(0, 200) + '...');
-                reply = value.trim();
-                break;
-              }
-            }
-          }
-          
-          // 如果还没找到，检查所有字符串类型的值
-          if (!reply) {
-            console.log('在所有字段中搜索字符串内容...');
-            for (const [key, value] of Object.entries(response)) {
-              if (typeof value === 'string' && value.trim().length > 0) {
-                console.log(`🔍 在字段 "${key}" 中发现字符串内容:`, value.substring(0, 200) + '...');
-                reply = value.trim();
-                break;
-              }
-            }
-          }
-        }
-      } else if (typeof response.response === 'string') {
-        reply = response.response;
-      } else if (typeof response.text === 'string') {
-        reply = response.text;
-      } else if (typeof response.output === 'string') {
-        reply = response.output;
-      } else if (response.choices && response.choices.length > 0) {
-        // OpenAI格式的响应
-        if (response.choices[0].message && response.choices[0].message.content) {
-          reply = response.choices[0].message.content;
-        } else if (response.choices[0].text) {
-          reply = response.choices[0].text;
-        }
-      } else if (response.content) {
-        reply = response.content;
-      } else if (response.message) {
-        reply = response.message;
-      } else {
-        console.error('未知的响应格式:', response);
-        // 检查是否包含模型ID或其他无效内容
-        const allValues = Object.values(response);
-        const possibleContent = allValues.find(val => 
-          typeof val === 'string' && 
-          val.length > 10 && 
-          val.length < 10000 && 
-          !val.startsWith('resp_') &&
-          !val.startsWith('@cf/') &&  // 过滤模型ID
-          !val.includes('openai') &&  // 过滤包含模型信息的字符串
-          !val.includes('gpt-oss')
-        );
-        
-        if (possibleContent) {
-          reply = possibleContent;
-        } else {
-          // 如果找不到有效内容，检查是否是异步响应或模型ID
-          const respIds = allValues.filter(val => 
-            typeof val === 'string' && val.startsWith('resp_')
-          );
-          const modelIds = allValues.filter(val => 
-            typeof val === 'string' && val.startsWith('@cf/')
-          );
-          
-          if (respIds.length > 0) {
-            console.log(`检测到异步响应ID: ${respIds[0]}`);
-            if (selectedModel.use_input) {
-              // 对于GPT模型，尝试轮询异步结果
-              console.log('开始轮询GPT异步响应...');
-              try {
-                reply = await pollAsyncResponse(respIds[0], env);
-                console.log('异步轮询成功获取结果:', reply?.substring(0, 200) + '...');
-              } catch (pollError) {
-                console.error('异步轮询失败:', pollError);
-                reply = `GPT模型正在异步处理您的请求 (${respIds[0]})。轮询失败: ${pollError.message}。请稍后重试或简化问题。`;
-              }
-            } else {
-              reply = `抱歉，AI模型返回了异步响应ID (${respIds[0]})，但当前不支持异步处理。请稍后重试或联系管理员。`;
-            }
-          } else if (modelIds.length > 0) {
-            reply = `抱歉，AI模型只返回了模型ID (${modelIds[0]}) 而没有生成实际内容。这可能是因为输入过短或模型配置问题。请尝试提供更详细的问题或稍后重试。`;
-          } else {
-            reply = `抱歉，AI模型返回了意外的格式。响应类型: ${typeof response}，可用字段: ${Object.keys(response).join(', ')}。原始内容: ${JSON.stringify(response).substring(0, 500)}...`;
-          }
-        }
+    // 处理DeepSeek的思考标签
+    if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
+      const thinkEndIndex = reply.lastIndexOf('</think>');
+      if (thinkEndIndex !== -1) {
+        reply = reply.substring(thinkEndIndex + 8).trim();
       }
-      
-      // 特殊处理DeepSeek模型的思考部分
-      if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
-        console.log('DeepSeek原始回复长度:', reply.length);
-        console.log('DeepSeek原始回复片段:', reply.substring(0, 200) + '...');
-        
-        // 提取 </think> 之后的内容作为最终答案
-        const thinkEndIndex = reply.lastIndexOf('</think>');
-        if (thinkEndIndex !== -1) {
-          const cleanReply = reply.substring(thinkEndIndex + 8).trim();
-          console.log('DeepSeek清理后回复:', cleanReply);
-          reply = cleanReply;
-        } else {
-          // 如果没有找到</think>，可能思考部分被截断，保留原内容
-          console.log('DeepSeek未找到</think>标签，保留原内容');
-        }
-      }
-      
-      // 为回复中的Markdown内容添加格式化
-      if (reply && typeof reply === 'string') {
-        reply = formatMarkdown(reply);
-      } else {
-        console.error('reply不是有效的字符串:', { reply, type: typeof reply });
-        reply = reply || '抱歉，AI模型没有返回有效的回复内容。';
-      }
+    }
+    
+    // 格式化Markdown内容
+    if (reply && typeof reply === 'string') {
+      reply = formatMarkdown(reply);
     } else {
-      console.error('完全意外的响应:', response);
-      reply = `抱歉，AI模型返回了完全意外的格式。响应类型: ${typeof response}`;
+      reply = reply || '抱歉，AI模型没有返回有效的回复内容。';
     }
 
     return new Response(JSON.stringify({ 
@@ -676,6 +529,87 @@ async function debugGPT(request, env, corsHeaders) {
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
     });
   }
+}
+
+// 新增：统一的响应文本提取函数
+function extractTextFromResponse(response, modelConfig) {
+  console.log('开始提取响应文本:', { response, modelId: modelConfig.id });
+  
+  // 如果直接是字符串
+  if (typeof response === 'string') {
+    console.log('响应是直接字符串:', response);
+    return response.trim();
+  }
+  
+  // 如果不是对象，返回错误信息
+  if (!response || typeof response !== 'object') {
+    console.error('响应格式无效:', response);
+    return `AI模型返回了无效的响应格式: ${typeof response}`;
+  }
+  
+  // 对于GPT模型，检查是否是异步响应ID
+  if (modelConfig.use_input) {
+    console.log('处理GPT模型响应...');
+    
+    // 检查所有字段，查找异步响应ID
+    const allValues = Object.values(response);
+    const asyncIds = allValues.filter(val => 
+      typeof val === 'string' && val.startsWith('resp_')
+    );
+    
+    if (asyncIds.length > 0) {
+      console.log('检测到异步响应ID:', asyncIds[0]);
+      return `GPT模型正在处理您的请求，响应ID: ${asyncIds[0]}。请注意，当前版本暂不支持异步轮询，建议简化问题或稍后重试。`;
+    }
+  }
+  
+  // 按优先级检查常见的响应字段
+  const possibleFields = [
+    'response',    // 最常见
+    'result',      
+    'content',     
+    'text',        
+    'output',      
+    'answer',      
+    'completion',  
+    'message',     
+    'data'         
+  ];
+  
+  for (const field of possibleFields) {
+    if (response[field] && typeof response[field] === 'string' && response[field].trim().length > 0) {
+      console.log(`在字段 "${field}" 中找到文本内容`);
+      return response[field].trim();
+    }
+  }
+  
+  // 检查OpenAI格式的响应
+  if (response.choices && response.choices.length > 0) {
+    if (response.choices[0].message && response.choices[0].message.content) {
+      return response.choices[0].message.content.trim();
+    } else if (response.choices[0].text) {
+      return response.choices[0].text.trim();
+    }
+  }
+  
+  // 最后搜索所有字符串类型的值
+  for (const [key, value] of Object.entries(response)) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      // 排除明显不是内容的字段
+      if (!value.startsWith('@cf/') && 
+          !value.startsWith('resp_') && 
+          !value.includes('openai') && 
+          !value.includes('gpt-oss') &&
+          value.length > 5) {
+        console.log(`在字段 "${key}" 中找到可能的文本内容`);
+        return value.trim();
+      }
+    }
+  }
+  
+  // 如果什么都没找到，返回调试信息
+  console.error('未找到有效的文本内容，响应结构:', response);
+  return `抱歉，AI模型返回了意外的格式。可用字段: ${Object.keys(response).join(', ')}。请联系管理员检查模型配置。`;
 }
 
 // 轮询异步响应结果
