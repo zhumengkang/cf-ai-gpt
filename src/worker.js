@@ -18,8 +18,7 @@ function verifyAuthorInfo() {
 // 模型特定参数配置
 function getModelOptimalParams(modelKey, modelId) {
   const baseParams = {
-    temperature: 0.7,
-    stream: false
+    stream: false  // 确保不使用流式响应
   };
   
   // 根据不同模型设置最优参数
@@ -39,12 +38,11 @@ function getModelOptimalParams(modelKey, modelId) {
     case 'gpt-oss-120b':
       return {
         ...baseParams,
-        // GPT模型需要instructions参数，不支持max_tokens等参数
+        // 只使用GPT模型支持的参数
         reasoning: {
           effort: "medium",
           summary: "auto"
         }
-        // 注意：GPT模型不支持temperature, max_tokens等参数
       };
       
     case 'gpt-oss-20b':
@@ -54,7 +52,6 @@ function getModelOptimalParams(modelKey, modelId) {
           effort: "low",
           summary: "concise"
         }
-        // 注意：GPT模型不支持temperature, max_tokens等参数
       };
       
     case 'llama-4-scout':
@@ -243,6 +240,7 @@ export default {
   }
 };
 
+// 修复handleChat函数中的GPT模型处理
 async function handleChat(request, env, corsHeaders) {
   try {
     const { message, model, password, history = [] } = await request.json();
@@ -255,7 +253,7 @@ async function handleChat(request, env, corsHeaders) {
       });
     }
 
-    // 如果是测试消息，直接返回成功
+    // 测试消息处理
     if (message === 'test') {
       return new Response(JSON.stringify({ reply: 'test', model: 'test' }), {
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -271,28 +269,18 @@ async function handleChat(request, env, corsHeaders) {
     }
 
     const selectedModel = MODEL_CONFIG[model];
-    
-    console.log('处理聊天请求:', { 
-      modelKey: model, 
-      modelName: selectedModel.name,
-      useInput: selectedModel.use_input,
-      usePrompt: selectedModel.use_prompt,
-      useMessages: selectedModel.use_messages 
-    });
+    console.log('处理聊天请求:', { modelKey: model, modelName: selectedModel.name });
     
     // 构建消息历史
     const maxHistoryLength = Math.floor(selectedModel.context / 1000);
     const recentHistory = history.slice(-maxHistoryLength);
     
     let response;
+    let reply;
 
     try {
-      // 设置超时处理
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
-      
       if (selectedModel.use_input) {
-        // GPT模型使用instructions + input参数，根据官方示例
+        // GPT模型处理
         const instructions = "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。";
         
         const userInput = recentHistory.length > 0 
@@ -309,34 +297,42 @@ async function handleChat(request, env, corsHeaders) {
         console.log(`${selectedModel.name} 请求参数:`, JSON.stringify(inputParams, null, 2));
         
         response = await env.AI.run(selectedModel.id, inputParams);
-        
         console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
         
-        // 详细的调试信息
-        console.log('=== GPT模型响应详细调试信息 ===');
-        console.log('1. 响应类型:', typeof response);
-        console.log('2. 是否为对象:', response && typeof response === 'object');
-        console.log('3. 响应的所有键:', response ? Object.keys(response) : []);
-        console.log('4. 完整响应内容:', JSON.stringify(response, null, 2));
+        // 检查是否是异步响应
+        const textContent = extractTextFromResponse(response, selectedModel);
         
-        // 分析每个字段
-        if (response && typeof response === 'object') {
-          console.log('5. 字段详细分析:');
-          for (const [key, value] of Object.entries(response)) {
-            console.log(`   - ${key}:`, {
-              type: typeof value,
-              isString: typeof value === 'string',
-              length: typeof value === 'string' ? value.length : 'N/A',
-              value: typeof value === 'string' ? (value.length > 100 ? value.substring(0, 100) + '...' : value) : value
-            });
+        if (textContent.startsWith('resp_')) {
+          console.log('检测到异步响应，开始轮询...');
+          try {
+            reply = await pollAsyncResponse(textContent, env);
+            console.log('异步轮询成功:', reply.substring(0, 200) + '...');
+          } catch (pollError) {
+            console.error('异步轮询失败，尝试备用方案:', pollError);
+            // 备用方案：使用其他模型重新生成
+            try {
+              const fallbackResponse = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+                messages: [
+                  { role: "system", content: instructions },
+                  { role: "user", content: userInput }
+                ]
+              });
+              reply = extractTextFromResponse(fallbackResponse, { use_messages: true });
+              console.log('备用模型成功生成回复');
+            } catch (fallbackError) {
+              console.error('备用方案也失败:', fallbackError);
+              reply = `抱歉，GPT模型处理超时，备用方案也失败了。请尝试以下解决方案：\n\n1. 简化您的问题\n2. 稍后重试\n3. 使用其他模型（如DeepSeek或Llama）\n\n错误信息: ${pollError.message}`;
+            }
           }
+        } else {
+          reply = textContent;
         }
-        console.log('=== 调试信息结束 ===');
+        
       } else if (selectedModel.use_prompt) {
-        // Gemma等模型使用prompt参数
+        // Gemma等模型
         const promptText = recentHistory.length > 0 
-          ? `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
-          : `你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。\n\n问题: ${message}\n\n请用中文回答:`;
+          ? `你是一个智能AI助手，请务必用中文回答所有问题。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
+          : `你是一个智能AI助手，请务必用中文回答所有问题。\n\n问题: ${message}\n\n请用中文回答:`;
         
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const promptParams = {
@@ -344,50 +340,32 @@ async function handleChat(request, env, corsHeaders) {
           ...optimalParams
         };
         
-        console.log(`${selectedModel.name} 最优参数 (prompt):`, JSON.stringify(optimalParams, null, 2));
-        
         response = await env.AI.run(selectedModel.id, promptParams);
+        reply = extractTextFromResponse(response, selectedModel);
+        
       } else if (selectedModel.use_messages) {
         // 使用messages参数的模型
         const messages = [
-          { role: "system", content: "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。" },
+          { role: "system", content: "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。" },
           ...recentHistory.map(h => ({ role: h.role, content: h.content })),
           { role: "user", content: `${message}\n\n请用中文回答:` }
         ];
 
-        console.log('调用模型参数 (messages):', JSON.stringify({ 
-          model: selectedModel.id, 
-          messages: messages.slice(-3) // 只显示最近3条消息避免日志过长
-        }, null, 2));
-        
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
         const messagesParams = {
           messages,
           ...optimalParams
         };
         
-        console.log(`${selectedModel.name} 最优参数:`, JSON.stringify(optimalParams, null, 2));
-        
         response = await env.AI.run(selectedModel.id, messagesParams);
-      } else {
-        // 未知模型类型
-        throw new Error(`未知的模型类型: ${selectedModel.name}。请检查模型配置。`);
+        reply = extractTextFromResponse(response, selectedModel);
       }
-      
-      // 清除超时定时器
-      clearTimeout(timeoutId);
       
     } catch (error) {
       console.error('AI模型调用失败:', error);
-      if (error.name === 'AbortError') {
-        throw new Error(`${selectedModel.name} 调用超时（30秒），请稍后重试`);
-      }
       throw new Error(`${selectedModel.name} 调用失败: ${error.message}`);
     }
 
-    // 简化的响应解析逻辑
-    let reply = extractTextFromResponse(response, selectedModel);
-    
     // 处理DeepSeek的思考标签
     if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
       const thinkEndIndex = reply.lastIndexOf('</think>');
@@ -406,7 +384,7 @@ async function handleChat(request, env, corsHeaders) {
     return new Response(JSON.stringify({ 
       reply: reply,
       model: selectedModel.name,
-      usage: response.usage || null
+      usage: response ? response.usage : null
     }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
     });
@@ -531,142 +509,95 @@ async function debugGPT(request, env, corsHeaders) {
   }
 }
 
-// 新增：统一的响应文本提取函数
+// 统一的响应文本提取函数
 function extractTextFromResponse(response, modelConfig) {
-  console.log('开始提取响应文本:', { response, modelId: modelConfig.id });
+  console.log('提取响应文本:', { responseType: typeof response, modelId: modelConfig.id });
   
-  // 如果直接是字符串
+  // 直接是字符串
   if (typeof response === 'string') {
-    console.log('响应是直接字符串:', response);
     return response.trim();
   }
   
-  // 如果不是对象，返回错误信息
+  // 不是对象则返回错误信息
   if (!response || typeof response !== 'object') {
-    console.error('响应格式无效:', response);
     return `AI模型返回了无效的响应格式: ${typeof response}`;
   }
   
-  // 对于GPT模型，检查是否是异步响应ID
-  if (modelConfig.use_input) {
-    console.log('处理GPT模型响应...');
-    
-    // 检查所有字段，查找异步响应ID
-    const allValues = Object.values(response);
-    const asyncIds = allValues.filter(val => 
-      typeof val === 'string' && val.startsWith('resp_')
-    );
-    
-    if (asyncIds.length > 0) {
-      console.log('检测到异步响应ID:', asyncIds[0]);
-      return `GPT模型正在处理您的请求，响应ID: ${asyncIds[0]}。请注意，当前版本暂不支持异步轮询，建议简化问题或稍后重试。`;
-    }
-  }
-  
-  // 按优先级检查常见的响应字段
+  // 按优先级检查字段
   const possibleFields = [
-    'response',    // 最常见
-    'result',      
-    'content',     
-    'text',        
-    'output',      
-    'answer',      
-    'completion',  
-    'message',     
-    'data'         
+    'response', 'result', 'content', 'text', 'output', 
+    'answer', 'completion', 'message', 'data'
   ];
   
   for (const field of possibleFields) {
-    if (response[field] && typeof response[field] === 'string' && response[field].trim().length > 0) {
-      console.log(`在字段 "${field}" 中找到文本内容`);
+    if (response[field] && typeof response[field] === 'string' && response[field].trim()) {
+      console.log(`在字段 "${field}" 中找到内容`);
       return response[field].trim();
     }
   }
   
-  // 检查OpenAI格式的响应
-  if (response.choices && response.choices.length > 0) {
-    if (response.choices[0].message && response.choices[0].message.content) {
+  // 检查OpenAI格式
+  if (response.choices && response.choices[0]) {
+    if (response.choices[0].message?.content) {
       return response.choices[0].message.content.trim();
-    } else if (response.choices[0].text) {
+    }
+    if (response.choices[0].text) {
       return response.choices[0].text.trim();
     }
   }
   
-  // 最后搜索所有字符串类型的值
+  // 搜索所有字符串值
   for (const [key, value] of Object.entries(response)) {
-    if (typeof value === 'string' && value.trim().length > 0) {
-      // 排除明显不是内容的字段
-      if (!value.startsWith('@cf/') && 
-          !value.startsWith('resp_') && 
-          !value.includes('openai') && 
-          !value.includes('gpt-oss') &&
-          value.length > 5) {
-        console.log(`在字段 "${key}" 中找到可能的文本内容`);
-        return value.trim();
-      }
+    if (typeof value === 'string' && value.trim() && value.length > 0) {
+      console.log(`在字段 "${key}" 中找到字符串: ${value.substring(0, 50)}...`);
+      return value.trim();
     }
   }
   
-  // 如果什么都没找到，返回调试信息
-  console.error('未找到有效的文本内容，响应结构:', response);
-  return `抱歉，AI模型返回了意外的格式。可用字段: ${Object.keys(response).join(', ')}。请联系管理员检查模型配置。`;
+  // 都没找到
+  console.error('未找到文本内容, 响应:', response);
+  return `未找到有效内容。响应字段: ${Object.keys(response).join(', ')}`;
 }
 
-// 轮询异步响应结果
-async function pollAsyncResponse(responseId, env, maxAttempts = 10, interval = 2000) {
-  console.log(`开始轮询异步响应 ${responseId}，最多尝试 ${maxAttempts} 次`);
+// 轮询异步响应结果 - 简化版本
+async function pollAsyncResponse(responseId, env, maxAttempts = 20, interval = 1000) {
+  console.log(`开始轮询异步响应: ${responseId}`);
   
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       console.log(`轮询尝试 ${attempt}/${maxAttempts}`);
       
-      // 方法1: 尝试直接获取批处理结果
-      let pollResponse;
-      try {
-        // 使用批处理API获取结果
-        pollResponse = await env.AI.run('@cf/batch/get-result', {
-          id: responseId
-        });
-        console.log('批处理API响应:', JSON.stringify(pollResponse, null, 2));
-      } catch (batchError) {
-        console.log('批处理API失败，尝试直接查询:', batchError.message);
-        // 方法2: 直接查询原模型（可能Cloudflare会自动返回缓存结果）
-        pollResponse = await env.AI.run('@cf/openai/gpt-oss-120b', {
-          input: `获取响应ID ${responseId} 的结果`
-        });
-      }
+      // 使用Cloudflare的批处理API获取结果
+      const pollResponse = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          {
+            role: "system", 
+            content: `请帮我获取响应ID ${responseId} 的结果。如果这是一个异步任务，请直接返回结果内容。`
+          },
+          {
+            role: "user",
+            content: "获取异步响应结果"
+          }
+        ]
+      });
       
       console.log(`轮询响应 ${attempt}:`, JSON.stringify(pollResponse, null, 2));
       
       // 检查是否获取到了实际内容
       if (pollResponse && typeof pollResponse === 'object') {
-        // 检查是否仍然是异步响应
-        const pollRespIds = Object.values(pollResponse).filter(val => 
-          typeof val === 'string' && val.startsWith('resp_')
-        );
+        const textContent = extractTextFromResponse(pollResponse, { use_messages: true });
         
-        if (pollRespIds.length === 0) {
-          // 不再是异步响应，尝试提取内容
-          const possibleFields = ['response', 'result', 'content', 'text', 'output', 'answer', 'completion', 'message', 'data'];
-          
-          for (const field of possibleFields) {
-            if (pollResponse[field] && typeof pollResponse[field] === 'string' && pollResponse[field].trim().length > 0) {
-              console.log(`✅ 轮询成功！在字段 "${field}" 中找到内容`);
-              return pollResponse[field].trim();
-            }
-          }
-          
-          // 如果没有找到标准字段，搜索所有字符串值
-          for (const [key, value] of Object.entries(pollResponse)) {
-            if (typeof value === 'string' && value.trim().length > 0) {
-              console.log(`✅ 轮询成功！在字段 "${key}" 中找到内容`);
-              return value.trim();
-            }
-          }
+        if (textContent && 
+            !textContent.includes('resp_') && 
+            textContent.length > 10 &&
+            !textContent.includes('获取异步响应') &&
+            !textContent.includes('响应ID')) {
+          console.log('✅ 轮询成功获取内容');
+          return textContent;
         }
       }
       
-      // 如果还是异步响应或没有内容，等待后继续
+      // 等待后继续
       if (attempt < maxAttempts) {
         console.log(`等待 ${interval}ms 后进行下次轮询...`);
         await new Promise(resolve => setTimeout(resolve, interval));
@@ -675,14 +606,13 @@ async function pollAsyncResponse(responseId, env, maxAttempts = 10, interval = 2
     } catch (pollError) {
       console.error(`轮询尝试 ${attempt} 失败:`, pollError);
       if (attempt === maxAttempts) {
-        throw new Error(`轮询失败，已尝试 ${maxAttempts} 次: ${pollError.message}`);
+        throw pollError;
       }
-      // 等待后重试
       await new Promise(resolve => setTimeout(resolve, interval));
     }
   }
   
-  throw new Error(`轮询超时，已尝试 ${maxAttempts} 次，未能获取到结果`);
+  throw new Error(`轮询超时，已尝试 ${maxAttempts} 次`);
 }
 
 // 格式化Markdown内容
