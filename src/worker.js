@@ -118,7 +118,7 @@ const MODEL_CONFIG = {
     "max_output": 4096,
     "input_price": 0.35,
     "output_price": 0.75,
-    "use_messages": true,
+    "use_input": true,
     "features": ["通用对话", "文本分析", "创意写作"]
   },
   "gpt-oss-20b": {
@@ -129,7 +129,7 @@ const MODEL_CONFIG = {
     "max_output": 2048,
     "input_price": 0.20,
     "output_price": 0.30,
-    "use_messages": true,
+    "use_input": true,
     "features": ["快速响应", "实时对话", "简单任务"]
   },
   "llama-4-scout": {
@@ -277,7 +277,30 @@ async function handleChat(request, env, corsHeaders) {
     let reply;
 
     try {
-      if (selectedModel.use_prompt) {
+      if (selectedModel.use_input) {
+        // GPT模型使用官方示例格式：instructions + input
+        const instructions = "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。";
+        
+        // input参数应该是字符串，不是数组
+        const userInput = recentHistory.length > 0 
+          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
+          : message;
+        
+        const optimalParams = getModelOptimalParams(model, selectedModel.id);
+        const inputParams = {
+          instructions: instructions,
+          input: userInput,  // 字符串格式，按照官方示例
+          ...optimalParams
+        };
+        
+        console.log(`${selectedModel.name} 请求参数:`, JSON.stringify(inputParams, null, 2));
+        
+        response = await env.AI.run(selectedModel.id, inputParams);
+        console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
+        
+        reply = extractTextFromResponse(response, selectedModel);
+        
+      } else if (selectedModel.use_prompt) {
         // Gemma等模型
         const promptText = recentHistory.length > 0 
           ? `你是一个智能AI助手，请务必用中文回答所有问题。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
@@ -301,27 +324,13 @@ async function handleChat(request, env, corsHeaders) {
         ];
 
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
+        const messagesParams = {
+          messages,
+          ...optimalParams
+        };
         
-        // 对于gpt-oss模型，使用input参数而不是messages参数
-        if (model.startsWith('gpt-oss')) {
-          const inputParams = {
-            input: messages,  // gpt-oss模型期望input为消息数组
-            ...optimalParams
-          };
-          
-          console.log(`${selectedModel.name} 请求参数 (input数组):`, JSON.stringify(inputParams, null, 2));
-          response = await env.AI.run(selectedModel.id, inputParams);
-        } else {
-          // 其他使用messages的模型
-          const messagesParams = {
-            messages,
-            ...optimalParams
-          };
-          
-          console.log(`${selectedModel.name} 请求参数 (messages):`, JSON.stringify(messagesParams, null, 2));
-          response = await env.AI.run(selectedModel.id, messagesParams);
-        }
-        
+        console.log(`${selectedModel.name} 请求参数:`, JSON.stringify(messagesParams, null, 2));
+        response = await env.AI.run(selectedModel.id, messagesParams);
         console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
         reply = extractTextFromResponse(response, selectedModel);
       }
