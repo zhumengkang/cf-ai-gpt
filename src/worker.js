@@ -299,34 +299,8 @@ async function handleChat(request, env, corsHeaders) {
         response = await env.AI.run(selectedModel.id, inputParams);
         console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
         
-        // 检查是否是异步响应
-        const textContent = extractTextFromResponse(response, selectedModel);
-        
-        if (textContent.startsWith('resp_')) {
-          console.log('检测到异步响应，开始轮询...');
-          try {
-            reply = await pollAsyncResponse(textContent, env);
-            console.log('异步轮询成功:', reply.substring(0, 200) + '...');
-          } catch (pollError) {
-            console.error('异步轮询失败，尝试备用方案:', pollError);
-            // 备用方案：使用其他模型重新生成
-            try {
-              const fallbackResponse = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-                messages: [
-                  { role: "system", content: instructions },
-                  { role: "user", content: userInput }
-                ]
-              });
-              reply = extractTextFromResponse(fallbackResponse, { use_messages: true });
-              console.log('备用模型成功生成回复');
-            } catch (fallbackError) {
-              console.error('备用方案也失败:', fallbackError);
-              reply = `抱歉，GPT模型处理超时，备用方案也失败了。请尝试以下解决方案：\n\n1. 简化您的问题\n2. 稍后重试\n3. 使用其他模型（如DeepSeek或Llama）\n\n错误信息: ${pollError.message}`;
-            }
-          }
-        } else {
-          reply = textContent;
-        }
+        // 直接提取文本内容，不处理异步
+        reply = extractTextFromResponse(response, selectedModel);
         
       } else if (selectedModel.use_prompt) {
         // Gemma等模型
@@ -509,110 +483,45 @@ async function debugGPT(request, env, corsHeaders) {
   }
 }
 
-// 统一的响应文本提取函数
+// 简化的响应文本提取函数
 function extractTextFromResponse(response, modelConfig) {
-  console.log('提取响应文本:', { responseType: typeof response, modelId: modelConfig.id });
-  
-  // 直接是字符串
+  // 直接是字符串就返回
   if (typeof response === 'string') {
     return response.trim();
   }
   
-  // 不是对象则返回错误信息
+  // 不是对象就返回错误
   if (!response || typeof response !== 'object') {
-    return `AI模型返回了无效的响应格式: ${typeof response}`;
+    return '抱歉，AI模型返回了无效的响应格式。';
   }
   
-  // 按优先级检查字段
-  const possibleFields = [
-    'response', 'result', 'content', 'text', 'output', 
-    'answer', 'completion', 'message', 'data'
-  ];
+  // 检查常见字段
+  const fields = ['response', 'result', 'content', 'text', 'output', 'answer', 'message'];
   
-  for (const field of possibleFields) {
-    if (response[field] && typeof response[field] === 'string' && response[field].trim()) {
-      console.log(`在字段 "${field}" 中找到内容`);
+  for (const field of fields) {
+    if (response[field] && typeof response[field] === 'string') {
       return response[field].trim();
     }
   }
   
   // 检查OpenAI格式
-  if (response.choices && response.choices[0]) {
-    if (response.choices[0].message?.content) {
-      return response.choices[0].message.content.trim();
-    }
-    if (response.choices[0].text) {
-      return response.choices[0].text.trim();
-    }
+  if (response.choices?.[0]?.message?.content) {
+    return response.choices[0].message.content.trim();
   }
   
-  // 搜索所有字符串值
-  for (const [key, value] of Object.entries(response)) {
-    if (typeof value === 'string' && value.trim() && value.length > 0) {
-      console.log(`在字段 "${key}" 中找到字符串: ${value.substring(0, 50)}...`);
+  if (response.choices?.[0]?.text) {
+    return response.choices[0].text.trim();
+  }
+  
+  // 查找任何字符串值
+  for (const value of Object.values(response)) {
+    if (typeof value === 'string' && value.trim() && value.length > 5) {
       return value.trim();
     }
   }
   
-  // 都没找到
-  console.error('未找到文本内容, 响应:', response);
-  return `未找到有效内容。响应字段: ${Object.keys(response).join(', ')}`;
-}
-
-// 轮询异步响应结果 - 简化版本
-async function pollAsyncResponse(responseId, env, maxAttempts = 20, interval = 1000) {
-  console.log(`开始轮询异步响应: ${responseId}`);
-  
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      console.log(`轮询尝试 ${attempt}/${maxAttempts}`);
-      
-      // 使用Cloudflare的批处理API获取结果
-      const pollResponse = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-        messages: [
-          {
-            role: "system", 
-            content: `请帮我获取响应ID ${responseId} 的结果。如果这是一个异步任务，请直接返回结果内容。`
-          },
-          {
-            role: "user",
-            content: "获取异步响应结果"
-          }
-        ]
-      });
-      
-      console.log(`轮询响应 ${attempt}:`, JSON.stringify(pollResponse, null, 2));
-      
-      // 检查是否获取到了实际内容
-      if (pollResponse && typeof pollResponse === 'object') {
-        const textContent = extractTextFromResponse(pollResponse, { use_messages: true });
-        
-        if (textContent && 
-            !textContent.includes('resp_') && 
-            textContent.length > 10 &&
-            !textContent.includes('获取异步响应') &&
-            !textContent.includes('响应ID')) {
-          console.log('✅ 轮询成功获取内容');
-          return textContent;
-        }
-      }
-      
-      // 等待后继续
-      if (attempt < maxAttempts) {
-        console.log(`等待 ${interval}ms 后进行下次轮询...`);
-        await new Promise(resolve => setTimeout(resolve, interval));
-      }
-      
-    } catch (pollError) {
-      console.error(`轮询尝试 ${attempt} 失败:`, pollError);
-      if (attempt === maxAttempts) {
-        throw pollError;
-      }
-      await new Promise(resolve => setTimeout(resolve, interval));
-    }
-  }
-  
-  throw new Error(`轮询超时，已尝试 ${maxAttempts} 次`);
+  // 实在找不到就返回友好提示
+  return '抱歉，AI模型没有返回可读的内容，请稍后重试。';
 }
 
 // 格式化Markdown内容
