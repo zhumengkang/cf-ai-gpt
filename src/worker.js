@@ -118,8 +118,7 @@ const MODEL_CONFIG = {
     "max_output": 4096,
     "input_price": 0.35,
     "output_price": 0.75,
-    "use_messages": false,
-    "use_input": true,
+    "use_messages": true,
     "features": ["通用对话", "文本分析", "创意写作"]
   },
   "gpt-oss-20b": {
@@ -130,8 +129,7 @@ const MODEL_CONFIG = {
     "max_output": 2048,
     "input_price": 0.20,
     "output_price": 0.30,
-    "use_messages": false,
-    "use_input": true,
+    "use_messages": true,
     "features": ["快速响应", "实时对话", "简单任务"]
   },
   "llama-4-scout": {
@@ -279,30 +277,7 @@ async function handleChat(request, env, corsHeaders) {
     let reply;
 
     try {
-      if (selectedModel.use_input) {
-        // GPT模型处理
-        const instructions = "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。";
-        
-        const userInput = recentHistory.length > 0 
-          ? `历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}`
-          : message;
-        
-        const optimalParams = getModelOptimalParams(model, selectedModel.id);
-        const inputParams = {
-          instructions: instructions,
-          input: userInput,
-          ...optimalParams
-        };
-        
-        console.log(`${selectedModel.name} 请求参数:`, JSON.stringify(inputParams, null, 2));
-        
-        response = await env.AI.run(selectedModel.id, inputParams);
-        console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
-        
-        // 直接提取文本内容，不处理异步
-        reply = extractTextFromResponse(response, selectedModel);
-        
-      } else if (selectedModel.use_prompt) {
+      if (selectedModel.use_prompt) {
         // Gemma等模型
         const promptText = recentHistory.length > 0 
           ? `你是一个智能AI助手，请务必用中文回答所有问题。\n\n历史对话:\n${recentHistory.map(h => `${h.role}: ${h.content}`).join('\n')}\n\n当前问题: ${message}\n\n请用中文回答:`
@@ -320,18 +295,34 @@ async function handleChat(request, env, corsHeaders) {
       } else if (selectedModel.use_messages) {
         // 使用messages参数的模型
         const messages = [
-          { role: "system", content: "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。" },
+          { role: "system", content: "你是一个智能AI助手，请务必用中文回答所有问题。无论用户使用什么语言提问，你都必须用中文回复。请确保你的回答完全使用中文，包括专业术语和代码注释。" },
           ...recentHistory.map(h => ({ role: h.role, content: h.content })),
           { role: "user", content: `${message}\n\n请用中文回答:` }
         ];
 
         const optimalParams = getModelOptimalParams(model, selectedModel.id);
-        const messagesParams = {
-          messages,
-          ...optimalParams
-        };
         
-        response = await env.AI.run(selectedModel.id, messagesParams);
+        // 对于gpt-oss模型，使用input参数而不是messages参数
+        if (model.startsWith('gpt-oss')) {
+          const inputParams = {
+            input: messages,  // gpt-oss模型期望input为消息数组
+            ...optimalParams
+          };
+          
+          console.log(`${selectedModel.name} 请求参数 (input数组):`, JSON.stringify(inputParams, null, 2));
+          response = await env.AI.run(selectedModel.id, inputParams);
+        } else {
+          // 其他使用messages的模型
+          const messagesParams = {
+            messages,
+            ...optimalParams
+          };
+          
+          console.log(`${selectedModel.name} 请求参数 (messages):`, JSON.stringify(messagesParams, null, 2));
+          response = await env.AI.run(selectedModel.id, messagesParams);
+        }
+        
+        console.log(`${selectedModel.name} 原始响应:`, JSON.stringify(response, null, 2));
         reply = extractTextFromResponse(response, selectedModel);
       }
       
@@ -341,18 +332,18 @@ async function handleChat(request, env, corsHeaders) {
     }
 
     // 处理DeepSeek的思考标签
-    if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
-      const thinkEndIndex = reply.lastIndexOf('</think>');
-      if (thinkEndIndex !== -1) {
+      if (selectedModel.id.includes('deepseek') && reply && reply.includes('<think>')) {
+        const thinkEndIndex = reply.lastIndexOf('</think>');
+        if (thinkEndIndex !== -1) {
         reply = reply.substring(thinkEndIndex + 8).trim();
       }
     }
     
     // 格式化Markdown内容
-    if (reply && typeof reply === 'string') {
-      reply = formatMarkdown(reply);
-    } else {
-      reply = reply || '抱歉，AI模型没有返回有效的回复内容。';
+      if (reply && typeof reply === 'string') {
+        reply = formatMarkdown(reply);
+      } else {
+        reply = reply || '抱歉，AI模型没有返回有效的回复内容。';
     }
 
     return new Response(JSON.stringify({ 
@@ -485,9 +476,21 @@ async function debugGPT(request, env, corsHeaders) {
 
 // 简化的响应文本提取函数
 function extractTextFromResponse(response, modelConfig) {
-  // 直接是字符串就返回
+  // 直接是字符串就返回，但要检查是否是异步ID
   if (typeof response === 'string') {
-    return response.trim();
+    const text = response.trim();
+    if (text.startsWith('resp_')) {
+      return `抱歉，GPT模型返回了异步响应ID，当前版本不支持异步处理。
+
+建议您：
+1. 🔄 刷新页面重试
+2. 🤖 使用其他模型（推荐DeepSeek-R1或Llama-4-Scout）
+3. ✂️ 简化您的问题
+4. ⏰ 稍后再试
+
+其他模型都能正常工作，只有GPT模型偶尔会出现这个问题。`;
+    }
+    return text;
   }
   
   // 不是对象就返回错误
@@ -500,23 +503,73 @@ function extractTextFromResponse(response, modelConfig) {
   
   for (const field of fields) {
     if (response[field] && typeof response[field] === 'string') {
-      return response[field].trim();
+      const text = response[field].trim();
+      // 检查是否是异步响应ID
+      if (text.startsWith('resp_')) {
+        return `抱歉，GPT模型返回了异步响应ID，当前版本不支持异步处理。
+
+建议您：
+1. 🔄 刷新页面重试
+2. 🤖 使用其他模型（推荐DeepSeek-R1或Llama-4-Scout）
+3. ✂️ 简化您的问题
+4. ⏰ 稍后再试
+
+其他模型都能正常工作，只有GPT模型偶尔会出现这个问题。`;
+      }
+      return text;
     }
   }
   
   // 检查OpenAI格式
   if (response.choices?.[0]?.message?.content) {
-    return response.choices[0].message.content.trim();
+    const text = response.choices[0].message.content.trim();
+    if (text.startsWith('resp_')) {
+      return `抱歉，GPT模型返回了异步响应ID，当前版本不支持异步处理。
+
+建议您：
+1. 🔄 刷新页面重试  
+2. 🤖 使用其他模型（推荐DeepSeek-R1或Llama-4-Scout）
+3. ✂️ 简化您的问题
+4. ⏰ 稍后再试
+
+其他模型都能正常工作，只有GPT模型偶尔会出现这个问题。`;
+    }
+    return text;
   }
   
   if (response.choices?.[0]?.text) {
-    return response.choices[0].text.trim();
+    const text = response.choices[0].text.trim();
+    if (text.startsWith('resp_')) {
+      return `抱歉，GPT模型返回了异步响应ID，当前版本不支持异步处理。
+
+建议您：
+1. 🔄 刷新页面重试
+2. 🤖 使用其他模型（推荐DeepSeek-R1或Llama-4-Scout）  
+3. ✂️ 简化您的问题
+4. ⏰ 稍后再试
+
+其他模型都能正常工作，只有GPT模型偶尔会出现这个问题。`;
+    }
+    return text;
   }
   
   // 查找任何字符串值
   for (const value of Object.values(response)) {
     if (typeof value === 'string' && value.trim() && value.length > 5) {
-      return value.trim();
+      const text = value.trim();
+      // 检查是否是异步响应ID
+      if (text.startsWith('resp_')) {
+        return `抱歉，GPT模型返回了异步响应ID，当前版本不支持异步处理。
+
+建议您：
+1. 🔄 刷新页面重试
+2. 🤖 使用其他模型（推荐DeepSeek-R1或Llama-4-Scout）
+3. ✂️ 简化您的问题  
+4. ⏰ 稍后再试
+
+其他模型都能正常工作，只有GPT模型偶尔会出现这个问题。`;
+      }
+      return text;
     }
   }
   
